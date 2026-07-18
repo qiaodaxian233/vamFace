@@ -74,6 +74,19 @@ Register with your MCP client (example for Claude Desktop config):
 }
 ```
 
+## Using without MCP
+
+The MCP server is only one frontend. The same fitting loop is available as
+a plain CLI (talks to the same VaM plugin over TCP):
+
+```bash
+vamface-fit photo.png --optimizer cma --iters 80
+vamface-fit photo.png --groups skull jaw --optimizer greedy   # coarse pass
+```
+
+A fully offline path (no VaM running at all: 3D reconstruction →
+least-squares morph solve → `.vap`) is planned as v0.3, see `docs/roadmap.md`.
+
 ## MCP tools
 
 | tool               | needs VaM | what it does                                  |

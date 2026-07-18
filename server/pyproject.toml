@@ -20,6 +20,7 @@ fit = [
 
 [project.scripts]
 vamface-mcp = "vamface_mcp.server:main"
+vamface-fit = "vamface_mcp.fit_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
