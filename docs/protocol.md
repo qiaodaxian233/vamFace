@@ -45,6 +45,13 @@ a guess (a missing morph is reported in `data.missing`, not an error).
 | `load_scene`   | `{path}`                                                    | `{loading}`                                        |
 | `focus_head`   | `{atom}`                                                    | `{focused}`                                        |
 | `screenshot`   | `{max_width?}`                                              | `{width, height, png_base64}`                     |
+| `list_storables` | `{atom}`                                                  | `{storables: [id]}`                               |
+| `list_params`  | `{atom, storable}`                                          | `{floats, bools, colors, choosers, strings}`      |
+| `get_param`    | `{atom, storable, param}`                                   | `{type, value, ...}` (colors: `{h,s,v}`)          |
+| `set_param`    | `{atom, storable, param, value, type?}`                     | `{type, value?}`                                  |
+| `call_action`  | `{atom, storable, action}`                                  | `{called}`                                        |
+| `list_characters` | `{atom}`                                                 | `{characters: [name]}`                            |
+| `set_character`| `{atom, name}`                                              | `{selected}`                                      |
 
 ## Notes / open questions for the live-VaM validation pass
 
@@ -61,6 +68,12 @@ follow community-plugin convention but have not yet been run against
 5. Whether `TcpListener` is permitted under the current plugin sandbox
    (community plugins like FacialMotionCapture use raw sockets, so this is
    expected to work; `HttpListener` is the one likely to be blocked).
+6. Generic param accessors: `GetFloatParamNames` / `GetColorJSONParam` /
+   `GetStringChooserJSONParam` etc., and `HSVColor` field names (`H/S/V`)
+   plus its range convention (assumed 0-1; conversion isolated in
+   `skin.rgb_to_vam_hsv`, fix there if it's 0-360).
+7. `DAZCharacterSelector.characters` / `SelectCharacterByName` for skin
+   switching.
 
 Screenshots use `ReadPixels` on the end-of-frame backbuffer; in VR the
 resolution can be large, hence the `max_width` downscale option.

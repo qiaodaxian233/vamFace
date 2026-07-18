@@ -17,10 +17,16 @@ fit = [
     "onnxruntime>=1.16",
     "cma>=3.3",
 ]
+# Local web GUI (vamface-gui).
+gui = [
+    "gradio>=4.0",
+    "matplotlib>=3.7",
+]
 
 [project.scripts]
 vamface-mcp = "vamface_mcp.server:main"
 vamface-fit = "vamface_mcp.fit_cli:main"
+vamface-gui = "vamface_mcp.gui:main"
 
 [build-system]
 requires = ["setuptools>=68"]

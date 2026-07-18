@@ -258,6 +258,13 @@ namespace VamFace
                     case "reset_morphs": Reply(req.conn, id, CmdResetMorphs(args)); break;
                     case "load_scene": Reply(req.conn, id, CmdLoadScene(args)); break;
                     case "focus_head": Reply(req.conn, id, CmdFocusHead(args)); break;
+                    case "list_storables": Reply(req.conn, id, CmdListStorables(args)); break;
+                    case "list_params": Reply(req.conn, id, CmdListParams(args)); break;
+                    case "get_param": Reply(req.conn, id, CmdGetParam(args)); break;
+                    case "set_param": Reply(req.conn, id, CmdSetParam(args)); break;
+                    case "call_action": Reply(req.conn, id, CmdCallAction(args)); break;
+                    case "list_characters": Reply(req.conn, id, CmdListCharacters(args)); break;
+                    case "set_character": Reply(req.conn, id, CmdSetCharacter(args)); break;
                     case "screenshot":
                         // async: coroutine replies when the frame is captured
                         StartCoroutine(CaptureRoutine(req.conn, id, args));
@@ -501,6 +508,240 @@ namespace VamFace
             SuperController.singleton.FocusOnController(head); // TODO(verify) signature in 1.22
             JSONClass d = new JSONClass();
             d["focused"] = atomUid + "/headControl";
+            return d;
+        }
+
+        // ------------------------------------------------------------------
+        // Generic storable/param access
+        // Lets the client DISCOVER real parameter names (e.g. skin color
+        // params) at runtime instead of us hard-coding guesses.
+        // ------------------------------------------------------------------
+
+        private Atom RequireAtom(string uid)
+        {
+            Atom atom = SuperController.singleton.GetAtomByUid(uid);
+            if (atom == null) throw new Exception("atom not found: " + uid);
+            return atom;
+        }
+
+        private JSONStorable RequireStorable(string atomUid, string storableId)
+        {
+            Atom atom = RequireAtom(atomUid);
+            JSONStorable st = atom.GetStorableByID(storableId);
+            if (st == null) throw new Exception("storable not found: " + atomUid + "/" + storableId);
+            return st;
+        }
+
+        private JSONClass CmdListStorables(JSONClass args)
+        {
+            Atom atom = RequireAtom(args["atom"].Value);
+            JSONArray arr = new JSONArray();
+            List<string> ids = atom.GetStorableIDs();
+            for (int i = 0; i < ids.Count; i++) arr.Add(new JSONData(ids[i]));
+            JSONClass d = new JSONClass();
+            d["storables"] = arr;
+            return d;
+        }
+
+        private static void AddNameArray(JSONClass d, string key, List<string> names)
+        {
+            JSONArray arr = new JSONArray();
+            if (names != null)
+            {
+                for (int i = 0; i < names.Count; i++) arr.Add(new JSONData(names[i]));
+            }
+            d[key] = arr;
+        }
+
+        private JSONClass CmdListParams(JSONClass args)
+        {
+            JSONStorable st = RequireStorable(args["atom"].Value, args["storable"].Value);
+            JSONClass d = new JSONClass();
+            // TODO(verify): these accessor names against 1.22
+            AddNameArray(d, "floats", st.GetFloatParamNames());
+            AddNameArray(d, "bools", st.GetBoolParamNames());
+            AddNameArray(d, "colors", st.GetColorParamNames());
+            AddNameArray(d, "choosers", st.GetStringChooserParamNames());
+            AddNameArray(d, "strings", st.GetStringParamNames());
+            return d;
+        }
+
+        private JSONClass CmdGetParam(JSONClass args)
+        {
+            JSONStorable st = RequireStorable(args["atom"].Value, args["storable"].Value);
+            string name = args["param"].Value;
+            JSONClass d = new JSONClass();
+
+            JSONStorableFloat jf = st.GetFloatJSONParam(name);
+            if (jf != null)
+            {
+                d["type"] = "float";
+                d["value"].AsFloat = jf.val;
+                d["min"].AsFloat = jf.min;
+                d["max"].AsFloat = jf.max;
+                return d;
+            }
+            JSONStorableBool jb = st.GetBoolJSONParam(name);
+            if (jb != null)
+            {
+                d["type"] = "bool";
+                d["value"].AsBool = jb.val;
+                return d;
+            }
+            JSONStorableColor jc = st.GetColorJSONParam(name);
+            if (jc != null)
+            {
+                d["type"] = "color";
+                JSONClass hsv = new JSONClass();
+                hsv["h"].AsFloat = jc.val.H; // TODO(verify) HSVColor field names
+                hsv["s"].AsFloat = jc.val.S;
+                hsv["v"].AsFloat = jc.val.V;
+                d["value"] = hsv;
+                return d;
+            }
+            JSONStorableStringChooser jch = st.GetStringChooserJSONParam(name);
+            if (jch != null)
+            {
+                d["type"] = "chooser";
+                d["value"] = jch.val;
+                JSONArray choices = new JSONArray();
+                if (jch.choices != null)
+                {
+                    for (int i = 0; i < jch.choices.Count; i++) choices.Add(new JSONData(jch.choices[i]));
+                }
+                d["choices"] = choices;
+                return d;
+            }
+            JSONStorableString js = st.GetStringJSONParam(name);
+            if (js != null)
+            {
+                d["type"] = "string";
+                d["value"] = js.val;
+                return d;
+            }
+            throw new Exception("param not found: " + name);
+        }
+
+        private JSONClass CmdSetParam(JSONClass args)
+        {
+            JSONStorable st = RequireStorable(args["atom"].Value, args["storable"].Value);
+            string name = args["param"].Value;
+            string type = args["type"] != null ? args["type"].Value : "";
+            JSONNode value = args["value"];
+            if (value == null) throw new Exception("set_param requires args.value");
+            JSONClass d = new JSONClass();
+
+            if (type == "" || type == "float")
+            {
+                JSONStorableFloat jf = st.GetFloatJSONParam(name);
+                if (jf != null)
+                {
+                    jf.val = value.AsFloat;
+                    d["type"] = "float";
+                    d["value"].AsFloat = jf.val;
+                    return d;
+                }
+                if (type == "float") throw new Exception("float param not found: " + name);
+            }
+            if (type == "" || type == "bool")
+            {
+                JSONStorableBool jb = st.GetBoolJSONParam(name);
+                if (jb != null)
+                {
+                    jb.val = value.AsBool;
+                    d["type"] = "bool";
+                    d["value"].AsBool = jb.val;
+                    return d;
+                }
+                if (type == "bool") throw new Exception("bool param not found: " + name);
+            }
+            if (type == "" || type == "color")
+            {
+                JSONStorableColor jc = st.GetColorJSONParam(name);
+                if (jc != null)
+                {
+                    HSVColor c = new HSVColor();
+                    c.H = value["h"].AsFloat; // TODO(verify) HSVColor field names
+                    c.S = value["s"].AsFloat;
+                    c.V = value["v"].AsFloat;
+                    jc.val = c;
+                    d["type"] = "color";
+                    return d;
+                }
+                if (type == "color") throw new Exception("color param not found: " + name);
+            }
+            if (type == "" || type == "chooser")
+            {
+                JSONStorableStringChooser jch = st.GetStringChooserJSONParam(name);
+                if (jch != null)
+                {
+                    jch.val = value.Value;
+                    d["type"] = "chooser";
+                    d["value"] = jch.val;
+                    return d;
+                }
+                if (type == "chooser") throw new Exception("chooser param not found: " + name);
+            }
+            if (type == "" || type == "string")
+            {
+                JSONStorableString js = st.GetStringJSONParam(name);
+                if (js != null)
+                {
+                    js.val = value.Value;
+                    d["type"] = "string";
+                    return d;
+                }
+                if (type == "string") throw new Exception("string param not found: " + name);
+            }
+            throw new Exception("param not found (any type): " + name);
+        }
+
+        private JSONClass CmdCallAction(JSONClass args)
+        {
+            JSONStorable st = RequireStorable(args["atom"].Value, args["storable"].Value);
+            string name = args["action"].Value;
+            st.CallAction(name); // TODO(verify) throws if missing? wrap either way
+            JSONClass d = new JSONClass();
+            d["called"] = name;
+            return d;
+        }
+
+        // ------------------------------------------------------------------
+        // Character (skin) selection
+        // ------------------------------------------------------------------
+
+        private DAZCharacterSelector RequireSelector(string atomUid)
+        {
+            Atom atom = RequireAtom(atomUid);
+            DAZCharacterSelector selector = atom.GetComponentInChildren<DAZCharacterSelector>();
+            if (selector == null) throw new Exception("atom is not a Person: " + atomUid);
+            return selector;
+        }
+
+        private JSONClass CmdListCharacters(JSONClass args)
+        {
+            DAZCharacterSelector selector = RequireSelector(args["atom"].Value);
+            JSONArray arr = new JSONArray();
+            DAZCharacter[] characters = selector.characters; // TODO(verify) member name
+            if (characters != null)
+            {
+                for (int i = 0; i < characters.Length; i++)
+                {
+                    if (characters[i] != null) arr.Add(new JSONData(characters[i].displayName));
+                }
+            }
+            JSONClass d = new JSONClass();
+            d["characters"] = arr;
+            return d;
+        }
+
+        private JSONClass CmdSetCharacter(JSONClass args)
+        {
+            DAZCharacterSelector selector = RequireSelector(args["atom"].Value);
+            string name = args["name"].Value;
+            selector.SelectCharacterByName(name); // TODO(verify) method name
+            JSONClass d = new JSONClass();
+            d["selected"] = name;
             return d;
         }
 

@@ -74,6 +74,29 @@ Register with your MCP client (example for Claude Desktop config):
 }
 ```
 
+## GUI
+
+A local web console (Gradio) — no MCP client needed:
+
+```bash
+pip install -e ".[gui]"
+vamface-gui        # opens http://127.0.0.1:7860
+```
+
+Tabs: **照片拟合** (drop a photo, watch target-vs-render + score curve live,
+export `.vap`), **皮肤 L0** (sample the photo's skin tone, switch character
+skins, write the tone into runtime-discovered color params), **连接调试**
+(ping / atoms / storable inspector).
+
+## Skin (Level 0)
+
+Geometry fitting and skin are separate problems. v0.2 ships the cheap tier:
+sample the dominant skin tone from the photo (YCrCb mask inside the face
+box, graceful fallback for stylized tones), pick the closest installed
+character skin, and write the tone into skin color params. Param names are
+**discovered at runtime** via the new generic storable API — nothing is
+hard-coded. Texture projection/generation is roadmap v0.4.
+
 ## Using without MCP
 
 The MCP server is only one frontend. The same fitting loop is available as

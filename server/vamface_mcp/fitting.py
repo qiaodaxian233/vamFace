@@ -137,6 +137,10 @@ class FitConfig:
     max_iters: int = 60
     screenshot_width: int = 512
     seed: Optional[Dict[str, float]] = None  # initial morph values (from route A)
+    # Called after every evaluation: (eval_count, score, rendered_image).
+    # Used by the GUI for live preview; exceptions in the callback are
+    # swallowed so a UI bug can't kill a long-running fit.
+    on_eval: Optional[Callable[[int, float, np.ndarray], None]] = None
 
 
 @dataclass
@@ -153,11 +157,20 @@ class FitResult:
 
 def make_evaluator(bridge: BridgeClient, target: np.ndarray, scorer: Scorer,
                    cfg: FitConfig) -> Callable[[Dict[str, float]], float]:
+    counter = {"n": 0}
+
     def evaluate(morphs: Dict[str, float]) -> float:
         bridge.set_morphs(cfg.atom, morphs, clamp=True)
         shot = bridge.screenshot(max_width=cfg.screenshot_width)
         candidate = decode_png_b64(shot["png_base64"])
-        return scorer.score(target, candidate)
+        score = scorer.score(target, candidate)
+        counter["n"] += 1
+        if cfg.on_eval is not None:
+            try:
+                cfg.on_eval(counter["n"], score, candidate)
+            except Exception:
+                log.exception("on_eval callback failed (ignored)")
+        return score
 
     return evaluate
 

@@ -16,7 +16,7 @@ import itertools
 import json
 import socket
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class BridgeError(RuntimeError):
@@ -131,3 +131,47 @@ class BridgeClient:
     def screenshot(self, max_width: int = 0) -> Dict[str, Any]:
         """Returns {"width", "height", "png_base64"}; can be several MB."""
         return self.call("screenshot", max_width=max_width, timeout=60.0)
+
+    # -- generic storable/param access ---------------------------------------
+
+    def list_storables(self, atom: str) -> List[str]:
+        return list(self.call("list_storables", atom=atom).get("storables") or [])
+
+    def list_params(self, atom: str, storable: str) -> Dict[str, List[str]]:
+        return self.call("list_params", atom=atom, storable=storable)
+
+    def get_param(self, atom: str, storable: str, param: str) -> Dict[str, Any]:
+        return self.call("get_param", atom=atom, storable=storable, param=param)
+
+    def set_param(self, atom: str, storable: str, param: str, value: Any,
+                  type: str = "") -> Dict[str, Any]:
+        return self.call("set_param", atom=atom, storable=storable,
+                         param=param, value=value, type=type)
+
+    def call_action(self, atom: str, storable: str, action: str) -> Dict[str, Any]:
+        return self.call("call_action", atom=atom, storable=storable, action=action)
+
+    def list_characters(self, atom: str) -> List[str]:
+        return list(self.call("list_characters", atom=atom).get("characters") or [])
+
+    def set_character(self, atom: str, name: str) -> Dict[str, Any]:
+        return self.call("set_character", atom=atom, name=name, timeout=120.0)
+
+    def find_color_params(self, atom: str,
+                          storable_filter: str = "skin") -> List[Dict[str, str]]:
+        """Scan storables and return [{storable, param}] for color params.
+
+        `storable_filter` is a case-insensitive substring; empty scans all.
+        """
+        hits: List[Dict[str, str]] = []
+        needle = storable_filter.lower()
+        for sid in self.list_storables(atom):
+            if needle and needle not in sid.lower():
+                continue
+            try:
+                params = self.list_params(atom, sid)
+            except BridgeError:
+                continue
+            for p in params.get("colors") or []:
+                hits.append({"storable": sid, "param": p})
+        return hits

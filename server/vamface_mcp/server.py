@@ -238,6 +238,92 @@ def vam_fit_face(target_image: str, atom: str = "Person",
         return _err(e)
 
 
+# ---------------------------------------------------------------------------
+# Generic storable/param access (runtime discovery, e.g. skin color params)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vam_list_storables(atom: str = "Person") -> Dict[str, Any]:
+    """List storable ids on an atom (entry point for parameter discovery)."""
+    try:
+        return {"ok": True, "storables": _bridge.list_storables(atom)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_list_params(storable: str, atom: str = "Person") -> Dict[str, Any]:
+    """List a storable's params grouped by type (floats/bools/colors/choosers/strings)."""
+    try:
+        return {"ok": True, **_bridge.list_params(atom, storable)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_get_param(storable: str, param: str, atom: str = "Person") -> Dict[str, Any]:
+    """Read one param's value (type auto-detected)."""
+    try:
+        return {"ok": True, **_bridge.get_param(atom, storable, param)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_set_param(storable: str, param: str, value: Any, type: str = "",
+                  atom: str = "Person") -> Dict[str, Any]:
+    """Write one param. `value`: number/bool/string, or {"h","s","v"} for colors."""
+    try:
+        return {"ok": True, **_bridge.set_param(atom, storable, param, value, type)}
+    except BridgeError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Skin: Level 0 (tone sampling + character selection + color application)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def skin_sample_tone(image: str) -> Dict[str, Any]:
+    """Sample the skin tone of a photo (offline). Returns rgb/hex/hsv."""
+    try:
+        from .skin import sample_skin_tone
+        return {"ok": True, **sample_skin_tone(image)}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_list_characters(atom: str = "Person") -> Dict[str, Any]:
+    """List installed character skins on a Person atom."""
+    try:
+        return {"ok": True, "characters": _bridge.list_characters(atom)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_set_character(name: str, atom: str = "Person") -> Dict[str, Any]:
+    """Switch the Person's character skin by display name."""
+    try:
+        return {"ok": True, **_bridge.set_character(atom, name)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_apply_skin_tone(image: str, atom: str = "Person",
+                        storable_filter: str = "skin") -> Dict[str, Any]:
+    """Level 0 one-shot: sample the photo's skin tone and write it to every
+    color param on storables matching the filter. Returns applied/failed
+    per-param so partial success is visible (nothing hard-fails)."""
+    try:
+        from .skin import suggest_and_apply
+        return {"ok": True, **suggest_and_apply(_bridge, atom, image, storable_filter)}
+    except (BridgeError, Exception) as e:
+        return _err(e)
+
+
 def main() -> None:
     mcp.run()
 
