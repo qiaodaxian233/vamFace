@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Project output
+server/out/
+out/
+*.vap
+!docs/**/*.vap
+
+# Models / weights
+*.onnx
+~/.insightface/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

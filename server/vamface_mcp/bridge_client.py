@@ -1,0 +1,133 @@
+"""TCP client for the VamFaceBridge plugin running inside VaM.
+
+Protocol: newline-delimited JSON over TCP (see docs/protocol.md).
+Request : {"id": "<n>", "cmd": "<name>", "args": {...}}
+Response: {"id": "<n>", "ok": true, "data": {...}}
+        | {"id": "<n>", "ok": false, "error": "..."}
+
+Responses are sent in request order per connection, but we still match by
+id to be safe. A single BridgeClient is not thread-safe by itself; all
+calls are serialized behind a lock, which is fine for MCP usage.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import socket
+import threading
+from typing import Any, Dict, Optional
+
+
+class BridgeError(RuntimeError):
+    """Raised when the bridge returns ok=false or the connection breaks."""
+
+
+class BridgeClient:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8787,
+                 timeout: float = 30.0) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self._sock: Optional[socket.socket] = None
+        self._file = None
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+
+    # -- connection management ------------------------------------------------
+
+    def _ensure_connected(self) -> None:
+        if self._sock is not None:
+            return
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        except OSError as e:
+            raise BridgeError(
+                f"cannot connect to VamFaceBridge at {self.host}:{self.port} — "
+                f"is VaM running with the session plugin loaded? ({e})"
+            ) from e
+        sock.settimeout(self.timeout)
+        self._sock = sock
+        self._file = sock.makefile("rb")
+
+    def close(self) -> None:
+        try:
+            if self._file is not None:
+                self._file.close()
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+        self._file = None
+
+    # -- request/response -----------------------------------------------------
+
+    def call(self, cmd: str, timeout: Optional[float] = None, **args: Any) -> Dict[str, Any]:
+        """Send one command and return the `data` object of the response."""
+        with self._lock:
+            self._ensure_connected()
+            assert self._sock is not None and self._file is not None
+            if timeout is not None:
+                self._sock.settimeout(timeout)
+            rid = str(next(self._ids))
+            payload = json.dumps({"id": rid, "cmd": cmd, "args": args})
+            try:
+                self._sock.sendall(payload.encode("utf-8") + b"\n")
+                while True:
+                    line = self._file.readline()
+                    if not line:
+                        self.close()
+                        raise BridgeError("connection closed by VaM")
+                    try:
+                        resp = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                        raise BridgeError(f"bad response from bridge: {e}") from e
+                    if str(resp.get("id", "")) != rid:
+                        continue  # stale response from a previous timeout
+                    if not resp.get("ok"):
+                        raise BridgeError(resp.get("error", "unknown bridge error"))
+                    return resp.get("data") or {}
+            except socket.timeout as e:
+                self.close()
+                raise BridgeError(f"bridge call '{cmd}' timed out") from e
+            except OSError as e:
+                self.close()
+                raise BridgeError(f"bridge I/O error on '{cmd}': {e}") from e
+            finally:
+                if timeout is not None and self._sock is not None:
+                    self._sock.settimeout(self.timeout)
+
+    # -- convenience wrappers ---------------------------------------------------
+
+    def ping(self) -> Dict[str, Any]:
+        return self.call("ping")
+
+    def list_atoms(self) -> Dict[str, Any]:
+        return self.call("list_atoms")
+
+    def list_morphs(self, atom: str, filter: str = "", region: str = "",
+                    limit: int = 200) -> Dict[str, Any]:
+        return self.call("list_morphs", atom=atom, filter=filter,
+                         region=region, limit=limit)
+
+    def get_morphs(self, atom: str, changed_only: bool = True) -> Dict[str, float]:
+        data = self.call("get_morphs", atom=atom, changed_only=changed_only)
+        return {k: float(v) for k, v in (data.get("values") or {}).items()}
+
+    def set_morphs(self, atom: str, values: Dict[str, float],
+                   clamp: bool = True) -> Dict[str, Any]:
+        return self.call("set_morphs", atom=atom, values=values, clamp=clamp)
+
+    def reset_morphs(self, atom: str) -> Dict[str, Any]:
+        return self.call("reset_morphs", atom=atom)
+
+    def load_scene(self, path: str) -> Dict[str, Any]:
+        return self.call("load_scene", path=path, timeout=120.0)
+
+    def focus_head(self, atom: str) -> Dict[str, Any]:
+        return self.call("focus_head", atom=atom)
+
+    def screenshot(self, max_width: int = 0) -> Dict[str, Any]:
+        """Returns {"width", "height", "png_base64"}; can be several MB."""
+        return self.call("screenshot", max_width=max_width, timeout=60.0)

@@ -1,0 +1,246 @@
+"""VamFace MCP server.
+
+Exposes VaM face automation as MCP tools over stdio, so an MCP-capable
+client (Claude Desktop, etc.) can:
+
+  - inspect the running scene (list_atoms, list_morphs)
+  - read/write morphs live (get_morphs, set_morphs, reset_morphs)
+  - take a screenshot of the current face
+  - save/load appearance presets (.vap) offline
+  - run an automated fit of the face toward a target photo
+
+Layering:
+  online tools  -> BridgeClient -> VamFaceBridge plugin inside VaM
+  offline tools -> vap.py (pure file I/O, VaM need not be running)
+
+Env vars:
+  VAMFACE_HOST (default 127.0.0.1)
+  VAMFACE_PORT (default 8787)
+  VAMFACE_OUTPUT_DIR (default ./out) — where screenshots/presets are written
+
+Run:  python -m vamface_mcp.server
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from mcp.server.fastmcp import FastMCP
+
+from .bridge_client import BridgeClient, BridgeError
+from .vap import read_vap, write_vap, merge_morphs
+from .morph_presets import default_face_morph_names, default_bounds
+from .fitting import FitConfig, fit_face
+
+HOST = os.environ.get("VAMFACE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("VAMFACE_PORT", "8787"))
+OUTPUT_DIR = Path(os.environ.get("VAMFACE_OUTPUT_DIR", "./out")).resolve()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+mcp = FastMCP("vamface")
+_bridge = BridgeClient(HOST, PORT)
+
+
+def _err(e: Exception) -> Dict[str, Any]:
+    return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Connectivity
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vam_ping() -> Dict[str, Any]:
+    """Check that VaM and the VamFaceBridge plugin are reachable."""
+    try:
+        return {"ok": True, **_bridge.ping()}
+    except BridgeError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Scene / morph inspection (online)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vam_list_atoms() -> Dict[str, Any]:
+    """List all atoms in the current scene (uid + type)."""
+    try:
+        return {"ok": True, **_bridge.list_atoms()}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_list_morphs(atom: str = "Person", filter: str = "",
+                    region: str = "", limit: int = 200) -> Dict[str, Any]:
+    """List morphs on a Person atom, optionally filtered by name/region."""
+    try:
+        return {"ok": True, **_bridge.list_morphs(atom, filter, region, limit)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_get_morphs(atom: str = "Person", changed_only: bool = True) -> Dict[str, Any]:
+    """Read current morph values (changed-from-default by default)."""
+    try:
+        return {"ok": True, "values": _bridge.get_morphs(atom, changed_only)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_set_morphs(values: Dict[str, float], atom: str = "Person",
+                   clamp: bool = True) -> Dict[str, Any]:
+    """Set morph values on a Person atom. Unknown names are reported, not fatal."""
+    try:
+        return {"ok": True, **_bridge.set_morphs(atom, values, clamp)}
+    except BridgeError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_reset_morphs(atom: str = "Person") -> Dict[str, Any]:
+    """Reset all changed morphs on a Person atom back to default."""
+    try:
+        return {"ok": True, **_bridge.reset_morphs(atom)}
+    except BridgeError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot (online)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vam_screenshot(atom: str = "Person", focus_head: bool = True,
+                   max_width: int = 768) -> Dict[str, Any]:
+    """Capture the VaM viewport. Saves a PNG and returns its path.
+
+    If focus_head is set, the camera is pointed at the head first so the
+    face is framed consistently.
+    """
+    try:
+        if focus_head:
+            try:
+                _bridge.focus_head(atom)
+                time.sleep(0.2)
+            except BridgeError:
+                pass  # focusing is best-effort, don't block the capture
+        shot = _bridge.screenshot(max_width=max_width)
+        png = base64.b64decode(shot["png_base64"])
+        path = OUTPUT_DIR / f"shot_{int(time.time()*1000)}.png"
+        path.write_bytes(png)
+        return {"ok": True, "path": str(path),
+                "width": shot.get("width"), "height": shot.get("height")}
+    except BridgeError as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Appearance presets (offline .vap)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vap_read(path: str) -> Dict[str, Any]:
+    """Read morph values from a .vap appearance preset file (offline)."""
+    try:
+        return {"ok": True, "values": read_vap(path)}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vap_write(morphs: Dict[str, float], path: Optional[str] = None) -> Dict[str, Any]:
+    """Write a morphs-only .vap appearance preset (offline)."""
+    try:
+        out = path or str(OUTPUT_DIR / f"face_{int(time.time())}.vap")
+        written = write_vap(out, morphs)
+        return {"ok": True, "path": written, "count": len(morphs)}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def vam_apply_vap(path: str, atom: str = "Person") -> Dict[str, Any]:
+    """Load morphs from a .vap file and push them live into VaM."""
+    try:
+        morphs = read_vap(path)
+        result = _bridge.set_morphs(atom, morphs, clamp=True)
+        return {"ok": True, "count": len(morphs), **result}
+    except (BridgeError, Exception) as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# The automation: fit face to a photo
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def vam_fit_face(target_image: str, atom: str = "Person",
+                 optimizer: str = "cma", max_iters: int = 60,
+                 groups: Optional[List[str]] = None,
+                 save_vap: bool = True) -> Dict[str, Any]:
+    """Automatically fit the VaM face to a target photo.
+
+    Runs a black-box optimization loop: set morphs -> screenshot ->
+    identity-similarity score -> repeat, keeping the best. Requires VaM
+    running with a Person atom and the target photo readable on disk.
+
+    Args:
+      target_image: path to the target face photo.
+      optimizer: "cma" (needs `cma` pkg) or "greedy" (dependency-free).
+      max_iters: evaluation budget (each iter is one screenshot round-trip).
+      groups: subset of morph regions to optimize
+              (skull/jaw/cheeks/eyes/nose/mouth/ears); default = all.
+      save_vap: also write the result as a .vap preset.
+
+    NOTE: if no identity scorer is installed (insightface), the score is a
+    placeholder 0.0 and `warning` will say so — the loop still runs but the
+    result is not meaningful. Install insightface for real fitting.
+    """
+    try:
+        from .morph_presets import FACE_MORPH_GROUPS
+        if groups:
+            names: List[str] = []
+            for g in groups:
+                names.extend(FACE_MORPH_GROUPS.get(g, []))
+        else:
+            names = default_face_morph_names()
+
+        cfg = FitConfig(
+            atom=atom,
+            morph_names=names,
+            bounds={n: default_bounds(n) for n in names},
+            max_iters=max_iters,
+        )
+        result = fit_face(_bridge, target_image, cfg, optimizer=optimizer)
+
+        out: Dict[str, Any] = {
+            "ok": True,
+            "best_score": result.best_score,
+            "morph_count": len(result.best_morphs),
+            "iterations": len(result.history),
+        }
+        if result.warning:
+            out["warning"] = result.warning
+        if save_vap:
+            vap_path = OUTPUT_DIR / f"fit_{int(time.time())}.vap"
+            write_vap(vap_path, result.best_morphs)
+            out["vap_path"] = str(vap_path)
+        return out
+    except (BridgeError, Exception) as e:
+        return _err(e)
+
+
+def main() -> None:
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
