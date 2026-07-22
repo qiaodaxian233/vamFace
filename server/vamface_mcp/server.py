@@ -185,7 +185,8 @@ def vam_apply_vap(path: str, atom: str = "Person") -> Dict[str, Any]:
 def vam_fit_face(target_image: str, atom: str = "Person",
                  optimizer: str = "cma", max_iters: int = 60,
                  groups: Optional[List[str]] = None,
-                 save_vap: bool = True) -> Dict[str, Any]:
+                 save_vap: bool = True, style: str = "auto",
+                 anime_onnx: Optional[str] = None) -> Dict[str, Any]:
     """Automatically fit the VaM face to a target photo.
 
     Runs a black-box optimization loop: set morphs -> screenshot ->
@@ -199,6 +200,12 @@ def vam_fit_face(target_image: str, atom: str = "Person",
       groups: subset of morph regions to optimize
               (skull/jaw/cheeks/eyes/nose/mouth/ears); default = all.
       save_vap: also write the result as a .vap preset.
+      style: scorer style — "auto" (detect from target), "real" (ArcFace),
+             "anime" (animeface landmark geometry; use for stylized faces
+             where ArcFace embeddings are meaningless), "pixel" (coarse,
+             for mock-server testing).
+      anime_onnx: optional path to a user-supplied anime face-recognition
+             ONNX model, blended into the anime scorer.
 
     NOTE: if no identity scorer is installed (insightface), the score is a
     placeholder 0.0 and `warning` will say so — the loop still runs but the
@@ -219,14 +226,19 @@ def vam_fit_face(target_image: str, atom: str = "Person",
             bounds={n: default_bounds(n) for n in names},
             max_iters=max_iters,
         )
-        result = fit_face(_bridge, target_image, cfg, optimizer=optimizer)
+        result = fit_face(_bridge, target_image, cfg, optimizer=optimizer,
+                          style=style, anime_onnx=anime_onnx)
 
         out: Dict[str, Any] = {
             "ok": True,
             "best_score": result.best_score,
+            "style": result.style,
+            "scorer": result.scorer_name,
             "morph_count": len(result.best_morphs),
             "iterations": len(result.history),
         }
+        if result.hints:
+            out["hints"] = result.hints
         if result.warning:
             out["warning"] = result.warning
         if save_vap:

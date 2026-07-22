@@ -75,7 +75,7 @@ def _score_plot(history: List[float]):
 # Tab 1: 照片拟合
 # ---------------------------------------------------------------------------
 
-def run_fit(host, port, photo_path, atom, optimizer, iters, groups, width):
+def run_fit(host, port, photo_path, atom, optimizer, style, iters, groups, width):
     """Generator: streams live progress to the UI while fitting runs."""
     if not photo_path:
         yield None, None, "请先上传目标照片", None, None
@@ -105,7 +105,8 @@ def run_fit(host, port, photo_path, atom, optimizer, iters, groups, width):
 
     def worker() -> None:
         try:
-            state["result"] = fit_face(bridge, photo_path, cfg, optimizer=optimizer)
+            state["result"] = fit_face(bridge, photo_path, cfg,
+                                       optimizer=optimizer, style=style)
         except Exception as e:  # BridgeError or optimizer failure
             state["error"] = str(e)
         finally:
@@ -132,7 +133,10 @@ def run_fit(host, port, photo_path, atom, optimizer, iters, groups, width):
     result = state["result"]
     vap_path = OUT_DIR / f"fit_{int(time.time())}.vap"
     write_vap(vap_path, result.best_morphs)
-    status = f"✅ 完成 · 最优分 {result.best_score:.4f} · 已存 {vap_path.name}"
+    status = (f"✅ 完成 · 最优分 {result.best_score:.4f} · "
+              f"打分 {result.style}/{result.scorer_name} · 已存 {vap_path.name}")
+    if result.hints:
+        status += "\n" + "\n".join(f"💡 {h}" for h in result.hints[:5])
     if result.warning:
         status += f"\n⚠️ {result.warning} — 分数是占位值,装拟合依赖: pip install -e '.[fit]'"
     yield target_img, state["last_img"], status, _score_plot(state["history"]), str(vap_path)
@@ -264,6 +268,8 @@ def build_app():
             with gr.Row():
                 atom = gr.Textbox(value="Person", label="Person 原子", scale=1)
                 optimizer = gr.Radio(["cma", "greedy"], value="cma", label="优化器", scale=1)
+                style = gr.Radio(["auto", "real", "anime", "pixel"], value="auto",
+                                 label="打分风格(anime 素材务必选 anime/auto)", scale=2)
                 iters = gr.Slider(10, 400, value=60, step=10, label="评估预算", scale=2)
                 width = gr.Slider(256, 1024, value=512, step=64, label="截图宽度", scale=1)
             groups = gr.CheckboxGroup(sorted(FACE_MORPH_GROUPS),
@@ -273,7 +279,7 @@ def build_app():
             fit_status = gr.Markdown("")
             fit_plot = gr.Plot(label="分数曲线")
             fit_vap = gr.File(label="导出的 .vap 预设")
-            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, iters, groups, width],
+            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, iters, groups, width],
                           [photo, current, fit_status, fit_plot, fit_vap])
 
         with gr.Tab("皮肤 L0"):

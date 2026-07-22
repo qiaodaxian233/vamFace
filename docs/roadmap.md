@@ -20,7 +20,21 @@
 - [ ] Multi-view scoring (front + 3/4) to avoid overfitting to one angle.
 - [ ] Cache screenshots keyed by morph vector hash to skip re-renders.
 
-## v0.3 — route A warm start (big speedup)
+## v0.3 (shipped) — scorer stack + mock VaM
+- [x] Switchable scorer styles: real / anime / pixel / auto, all with
+      graceful degrade + warnings (`scorers.py`).
+- [x] Anime path: animeface landmark geometry scorer; optional user-supplied
+      anime-recognition ONNX embedding (`--anime-onnx`).
+- [x] Directional hints from feature deltas ("Eyes Width Spacing ↑"),
+      surfaced in CLI / GUI / MCP result.
+- [x] Mock VaM server (`vamface-mock`): full protocol, parametric face
+      renderer, hidden-target mode; 27-test suite incl. hidden-target
+      end-to-end fit. Live-VaM validation demoted from blocker to final
+      reconciliation.
+- [x] Bugfix caught by the mock: `cma_optimize` numpy-truthiness crash on
+      result assembly (`best_vec or x0`).
+
+## v0.4 — route A warm start (big speedup)
 - [ ] Single-image 3D face reconstruction (DECA / MICA / FLAME-based) →
       target mesh.
 - [ ] Precompute Genesis 2 base mesh + per-morph vertex deltas once.
@@ -28,7 +42,7 @@
       best match the reconstructed target geometry → **seed** for the loop.
 - [ ] With a good seed, the CMA-ES refine step should need far fewer iters.
 
-## v0.4 — beyond geometry
+## v0.5 — beyond geometry
 - [ ] Skin tone / texture: sample dominant skin color from the photo, map
       to the closest installed skin, or drive a texture-tint slider.
 - [ ] Optional VLM-in-the-loop scorer (screenshot + target → vision model

@@ -4,10 +4,11 @@ An **MCP server + VaM plugin** that automates face creation in
 **Virt-A-Mate 1.22.0.3**: point it at a face photo and it drives the
 in-game morph sliders until the rendered face matches.
 
-> ⚠️ Status: **initial draft (v0.1)**. The offline layer (`.vap` read/write)
-> is tested and working. The online layer (VaM plugin + fitting loop) is
-> written but its VaM API calls are marked `TODO(verify)` and need one
-> validation pass against a live VaM 1.22 — see `docs/protocol.md`.
+> ⚠️ Status: **v0.3**. The offline layer (`.vap` read/write) is tested; the
+> whole pipeline (bridge client ↔ protocol ↔ fitting ↔ export) is now
+> exercised end-to-end against the bundled **mock VaM** (`vamface-mock`,
+> 27 tests). What still needs a live VaM 1.22 pass is only the plugin-side
+> API names marked `TODO(verify)` — see `docs/protocol.md`.
 
 ## How it works
 
@@ -73,6 +74,44 @@ Register with your MCP client (example for Claude Desktop config):
   }
 }
 ```
+
+## Scorer styles (anime vs real)
+
+ArcFace embeddings are trained on real human photos — on anime/stylized
+faces they are basically noise, and the loop would optimize toward nothing.
+The scorer is therefore **switchable** (`--style` on the CLI, a radio in the
+GUI, `style=` on the MCP tool):
+
+| style   | what it uses                                                     | use when |
+|---------|------------------------------------------------------------------|----------|
+| `real`  | ArcFace identity (0.75) + landmark geometry (0.25)               | photoreal targets |
+| `anime` | animeface landmark geometry (+ optional user ONNX embedding via `--anime-onnx`) | anime / stylized targets (`pip install -e ".[anime]"`) |
+| `pixel` | downsampled grayscale RMSE similarity                            | mock testing, render-vs-render |
+| `auto`  | probes the target with both detectors, picks accordingly         | default |
+
+Every style degrades gracefully with a warning when its dependency is
+missing — the loop never crashes on a missing model.
+
+The geometry scorer also emits **directional hints** after the fit
+("target eye spacing larger → Eyes Width Spacing ↑"), printed by the CLI
+and shown in the GUI — the black-box score says *how unlike*, the feature
+deltas say *what to change*.
+
+## Mock VaM (test without VaM)
+
+`vamface-mock` is a fake VaM: same TCP protocol, but rendering a smooth
+parametric cartoon face driven by the same 44 curated morph names. It
+unblocks all development on machines without VaM:
+
+```bash
+vamface-mock --seed 42          # prints a hidden target morph vector,
+                                # saves mock_target_42.png
+vamface-fit mock_target_42.png --style pixel --optimizer cma --iters 120
+```
+
+The fit should recover the hidden morphs — this is the standing regression
+that exercises bridge client, protocol, screenshot decode, scorers,
+optimizers and `.vap` export in one go (`server/tests/`).
 
 ## GUI
 

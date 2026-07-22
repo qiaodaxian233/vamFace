@@ -36,6 +36,12 @@ def main(argv=None) -> int:
     parser.add_argument("photo", help="path to the target face photo")
     parser.add_argument("--atom", default="Person", help="Person atom uid (default: Person)")
     parser.add_argument("--optimizer", choices=["cma", "greedy"], default="cma")
+    parser.add_argument("--style", choices=["auto", "real", "anime", "pixel"],
+                        default="auto",
+                        help="打分风格: auto=探测目标图 / real=ArcFace / "
+                             "anime=animeface 几何 / pixel=像素(mock 测试用)")
+    parser.add_argument("--anime-onnx", default=None,
+                        help="可选: anime 识别 ONNX 模型路径(style=anime 时加权合入)")
     parser.add_argument("--iters", type=int, default=60, help="evaluation budget")
     parser.add_argument("--groups", nargs="*", choices=sorted(FACE_MORPH_GROUPS),
                         help="morph regions to optimize (default: all)")
@@ -75,13 +81,17 @@ def main(argv=None) -> int:
           f"budget={args.iters} evaluations ...")
     t0 = time.time()
     try:
-        result = fit_face(bridge, str(photo), cfg, optimizer=args.optimizer)
+        result = fit_face(bridge, str(photo), cfg, optimizer=args.optimizer,
+                          style=args.style, anime_onnx=args.anime_onnx)
     except BridgeError as e:
         print(f"error during fit: {e}", file=sys.stderr)
         return 1
 
     elapsed = time.time() - t0
-    print(f"done in {elapsed:.0f}s — best identity score: {result.best_score:.4f}")
+    print(f"done in {elapsed:.0f}s — best score: {result.best_score:.4f} "
+          f"(style={result.style}, scorer={result.scorer_name})")
+    for h in result.hints:
+        print(f"  提示: {h}")
     if result.warning:
         print(f"WARNING: {result.warning}", file=sys.stderr)
         print("         (score above is a placeholder; install extras: "

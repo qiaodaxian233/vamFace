@@ -1,6 +1,6 @@
 [project]
 name = "vamface-mcp"
-version = "0.1.0"
+version = "0.3.0"
 description = "MCP server for automating face creation in Virt-A-Mate 1.22 from photos"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,10 @@ fit = [
     "onnxruntime>=1.16",
     "cma>=3.3",
 ]
+# anime 素材的 landmark 几何打分器(style=anime / auto)。
+anime = [
+    "animeface>=1.1",
+]
 # Local web GUI (vamface-gui).
 gui = [
     "gradio>=4.0",
@@ -27,6 +31,7 @@ gui = [
 vamface-mcp = "vamface_mcp.server:main"
 vamface-fit = "vamface_mcp.fit_cli:main"
 vamface-gui = "vamface_mcp.gui:main"
+vamface-mock = "vamface_mcp.mock_vam:main"
 
 [build-system]
 requires = ["setuptools>=68"]

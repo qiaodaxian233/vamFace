@@ -53,6 +53,14 @@ a guess (a missing morph is reported in `data.missing`, not an error).
 | `list_characters` | `{atom}`                                                 | `{characters: [name]}`                            |
 | `set_character`| `{atom, name}`                                              | `{selected}`                                      |
 
+## Reference implementation: mock server
+
+`server/vamface_mcp/mock_vam.py` (`vamface-mock`) implements this entire
+command table against a parametric renderer, and `server/tests/` pins the
+behavior (missing-morph reporting, clamping, error shapes, screenshot
+downscale). If the live plugin and the mock ever disagree, the protocol
+doc + tests are the arbiter.
+
 ## Notes / open questions for the live-VaM validation pass
 
 Several VaM API calls in the plugin are marked `TODO(verify)` because they

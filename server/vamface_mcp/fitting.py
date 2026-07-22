@@ -65,63 +65,18 @@ def load_image(path: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Scorers
+# Scorers —— 已迁到 scorers.py(v0.3:可切换的 real/anime/pixel 打分器栈)。
+# 这里 re-export 旧名字,老的调用方(server.py / 外部脚本)不用改。
 # ---------------------------------------------------------------------------
 
-class Scorer:
-    def score(self, target: np.ndarray, candidate: np.ndarray) -> float:
-        raise NotImplementedError
-
-
-class NullScorer(Scorer):
-    """Fallback that always returns 0.0. Lets everything wire up headless."""
-
-    reason = "no identity scorer available (install insightface)"
-
-    def score(self, target: np.ndarray, candidate: np.ndarray) -> float:
-        return 0.0
-
-
-class ArcFaceScorer(Scorer):
-    """Cosine similarity between ArcFace embeddings of the two faces."""
-
-    def __init__(self) -> None:
-        from insightface.app import FaceAnalysis  # heavy, lazy
-
-        self.app = FaceAnalysis(name="buffalo_l")
-        self.app.prepare(ctx_id=0, det_size=(640, 640))
-        self._target_cache: Optional[np.ndarray] = None
-
-    def _embed(self, img: np.ndarray) -> Optional[np.ndarray]:
-        faces = self.app.get(img[:, :, ::-1])  # insightface wants BGR
-        if not faces:
-            return None
-        faces.sort(key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
-                   reverse=True)
-        emb = faces[0].normed_embedding
-        return np.asarray(emb, dtype=np.float32)
-
-    def set_target(self, target: np.ndarray) -> bool:
-        self._target_cache = self._embed(target)
-        return self._target_cache is not None
-
-    def score(self, target: np.ndarray, candidate: np.ndarray) -> float:
-        if self._target_cache is None:
-            if not self.set_target(target):
-                return 0.0
-        cand = self._embed(candidate)
-        if cand is None:
-            return 0.0
-        return float(np.dot(self._target_cache, cand))
+from .scorers import (ArcFaceScorer, NullScorer, PixelScorer,  # noqa: F401
+                      Scorer, build_scorer_stack)
 
 
 def build_scorer() -> Tuple[Scorer, Optional[str]]:
-    """Return (scorer, warning). Never raises on missing deps."""
-    try:
-        return ArcFaceScorer(), None
-    except Exception as e:  # ImportError or model download failure
-        log.warning("ArcFace unavailable, degrading to NullScorer: %s", e)
-        return NullScorer(), f"{NullScorer.reason}: {e}"
+    """兼容旧签名:等价于 build_scorer_stack("real")。新代码请用后者。"""
+    b = build_scorer_stack("real")
+    return b.scorer, b.warning
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +104,9 @@ class FitResult:
     best_morphs: Dict[str, float]
     history: List[float]
     warning: Optional[str] = None
+    style: Optional[str] = None          # 实际生效的打分风格(auto 解析后)
+    scorer_name: Optional[str] = None    # 打分器组合的可读名
+    hints: List[str] = field(default_factory=list)  # 几何差 → 方向性提示
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +210,10 @@ def cma_optimize(evaluate: Callable[[Dict[str, float]], float],
             history.append(best_score)
         es.tell(solutions, costs)
 
-    best_morphs = {n: float(v) for n, v in zip(names, best_vec or x0)}
+    # 注意:best_vec 是 numpy 数组,`best_vec or x0` 会抛 ValueError(数组真值
+    # 歧义)。这是 v0.1 的遗留 bug,mock 端到端测试抓出来的。
+    final_vec = x0 if best_vec is None else best_vec
+    best_morphs = {n: float(v) for n, v in zip(names, final_vec)}
     return FitResult(best_score=best_score, best_morphs=best_morphs, history=history)
 
 
@@ -261,9 +222,12 @@ def cma_optimize(evaluate: Callable[[Dict[str, float]], float],
 # ---------------------------------------------------------------------------
 
 def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
-             optimizer: str = "cma") -> FitResult:
+             optimizer: str = "cma", style: str = "auto",
+             anime_onnx: Optional[str] = None) -> FitResult:
+    """style: auto | real | anime | pixel(见 scorers.build_scorer_stack)。"""
     target = load_image(target_image_path)
-    scorer, warning = build_scorer()
+    build = build_scorer_stack(style, target=target, anime_onnx=anime_onnx)
+    scorer = build.scorer
     if isinstance(scorer, ArcFaceScorer):
         scorer.set_target(target)
 
@@ -278,5 +242,14 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
 
     # leave VaM showing the best result
     bridge.set_morphs(cfg.atom, result.best_morphs, clamp=True)
-    result.warning = warning
+    result.warning = build.warning
+    result.style = build.style
+    result.scorer_name = scorer.name
+    # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
+    try:
+        shot = bridge.screenshot(max_width=cfg.screenshot_width)
+        scorer.score(target, decode_png_b64(shot["png_base64"]))
+        result.hints = scorer.hints()
+    except Exception:
+        log.exception("final hints pass failed (ignored)")
     return result
