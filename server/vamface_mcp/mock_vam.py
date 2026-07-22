@@ -39,12 +39,15 @@ log = logging.getLogger("vamface.mock")
 
 MOCK_VERSION = "mock-0.3"
 
-# morph 名 → (分组, min, max)。全量支持 44 个精选 morph,范围沿 VaM 惯例。
+# morph 名 → (分组, min, max)。44 个精选身份 morph + 若干表情 morph
+# (表情不在精选子集里,专门用来测 v0.4 的表情归一化)。范围沿 VaM 惯例。
+EXPRESSION_MORPHS = ["Smile Full Face", "Brow Up", "Eyes Closed"]
 MORPH_DEFS: Dict[str, Tuple[str, float, float]] = {
     name: (group, -1.5, 1.5)
     for group, names in FACE_MORPH_GROUPS.items()
     for name in names
 }
+MORPH_DEFS.update({name: ("expression", 0.0, 1.5) for name in EXPRESSION_MORPHS})
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -112,10 +115,13 @@ class FaceRenderer:
 
         # ---- 眼睛 ----------------------------------------------------------
         eye_gap = fw * (0.46 + 0.14 * g("Eyes Width Spacing"))
-        eye_y = cy - fh * (0.18 - 0.06 * g("Eyes Height"))
+        # 注意符号:Eyes Height 正值 = 眼更靠上(G2 惯例),必须与
+        # scorers._HINT_MAP / priors.FEATURE_TO_MORPHS 的方向约定一致。
+        eye_y = cy - fh * (0.18 + 0.06 * g("Eyes Height"))
         eye_w = 30 * (1 + 0.35 * g("Eyes Size"))
         eye_h = 18 * (1 + 0.35 * g("Eyes Size") - 0.30 * g("Eyelids Height")
                       + 0.10 * g("Eye Fold Depth"))
+        eye_h *= max(0.15, 1.0 - 0.8 * max(0.0, g("Eyes Closed")))  # 表情:闭眼
         slant = 10 * g("Eyes Slant")
         depth_shade = int(20 * max(0.0, g("Eyes Depth")))
         for sx in (-1, 1):
@@ -132,7 +138,7 @@ class FaceRenderer:
             r = eye_h * 0.75
             d.ellipse([ex - r, ey - r, ex + r, ey + r], fill=(70, 60, 120))
             # 眉毛
-            by = ey - eye_h - 16 - 10 * g("Brow Height")
+            by = ey - eye_h - 16 - 10 * g("Brow Height") - 12 * g("Brow Up")
             d.line([ex - eye_w, by + 3 * sx * 0, ex + eye_w, by - slant * 0.4],
                    fill=(90, 70, 60), width=5)
 
@@ -158,7 +164,7 @@ class FaceRenderer:
                       + 0.15 * g("Upper Lip Thickness")
                       + 0.15 * g("Lower Lip Thickness")
                       + 0.10 * g("Mouth Size"))
-        corner = 8 * g("Mouth Corners")
+        corner = 8 * g("Mouth Corners") + 10 * g("Smile Full Face")  # 表情:笑
         d.ellipse([cx - mouth_w, mouth_y - lip_h, cx + mouth_w, mouth_y + lip_h],
                   fill=(196, 106, 110), outline=(120, 60, 60))
         d.arc([cx - mouth_w, mouth_y - abs(corner) - 2,
@@ -175,6 +181,69 @@ class FaceRenderer:
 # ---------------------------------------------------------------------------
 # 协议服务器
 # ---------------------------------------------------------------------------
+
+def features_from_mock(img, skin_rgb: Tuple[int, int, int] = (236, 200, 172)):
+    """mock 卡通脸的几何特征提取器(颜色分割版)。
+
+    两个用途:
+      1. 给先验(priors)做**定量**端到端验证:同一隐藏目标,带/不带先验
+         对比评估次数 —— 没有它,几何路径在无 animeface 的机器上测不了;
+      2. 当一份"提取器该长什么样"的参考实现:输出键与
+         scorers.GeometryScorer.WEIGHTS 对齐,检不出返回 None 不抛异常。
+
+    只认 FaceRenderer 的固定用色(虹膜/嘴/皮肤),对真实图片一律 None ——
+    这是 mock 专用工具,别拿去打真图。
+
+    ⚠️ 分辨率注意:颜色分割对降采样敏感 —— 双三次插值会把掩膜边缘的
+    颜色混掉(256px 下嘴宽特征失真可达 4 倍)。目标图和截图务必**同
+    分辨率**使用(mock 原生 512,配 screenshot_width=512 或 0)。
+    """
+    import numpy as np
+
+    a = np.asarray(img).astype(np.int16)
+
+    def color_mask(rgb, tol):
+        return np.abs(a - np.asarray(rgb, dtype=np.int16)).sum(axis=2) < tol
+
+    skin = color_mask(skin_rgb, 70)
+    iris = color_mask((70, 60, 120), 90)
+    mouth = color_mask((196, 106, 110), 90)
+    if skin.sum() < 200 or iris.sum() < 8:
+        return None
+    ys, xs = np.nonzero(skin)
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    fw, fh = max(x1 - x0, 1), max(y1 - y0, 1)
+    # 紧凑度校验:随机噪声也会有像素撞进颜色容差,但那些命中是**散的**;
+    # 真的 mock 脸/虹膜是实心区域,在自己的包围盒里密度很高。
+    if skin.sum() / (fw * fh) < 0.25:
+        return None
+    cx_face = (x0 + x1) / 2.0
+
+    iy, ix = np.nonzero(iris)
+    left, right = ix < cx_face, ix >= cx_face
+    if left.sum() < 4 or right.sum() < 4:
+        return None
+    lex, ley = ix[left].mean(), iy[left].mean()
+    rex, rey = ix[right].mean(), iy[right].mean()
+    lw, lh = np.ptp(ix[left]), np.ptp(iy[left])
+    rw, rh = np.ptp(ix[right]), np.ptp(iy[right])
+    for cnt, w_, h_ in ((left.sum(), lw, lh), (right.sum(), rw, rh)):
+        if w_ > 0.4 * fw or cnt / max((w_ + 1) * (h_ + 1), 1) < 0.2:
+            return None  # 虹膜簇太散/太大 → 不是 mock 脸
+
+    feat = {
+        "eye_gap": abs(rex - lex) / fw,
+        "eye_w": (lw + rw) / 2.0 / fw,
+        "eye_h": (lh + rh) / 2.0 / fh,
+        "eye_y": ((ley + rey) / 2.0 - y0) / fh,
+        "face_aspect": fh / fw,
+    }
+    if mouth.sum() >= 8:
+        my, mx = np.nonzero(mouth)
+        feat["mouth_w"] = np.ptp(mx) / fw
+        feat["mouth_y"] = (my.mean() - y0) / fh
+    return feat
+
 
 class MockVamServer:
     """实现 docs/protocol.md 全部命令的假 VaM。线程化,支持多连接。"""

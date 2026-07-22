@@ -215,8 +215,8 @@ class _InsightFeatureExtractor:
             try:
                 for key, sl in (("_l", slice(33, 43)), ("_r", slice(87, 97))):
                     pts = lmk[sl]
-                    feat["eye_w" + key] = float(pts[:, 0].ptp()) / fw
-                    feat["eye_h" + key] = float(pts[:, 1].ptp()) / fh
+                    feat["eye_w" + key] = float(np.ptp(pts[:, 0])) / fw
+                    feat["eye_h" + key] = float(np.ptp(pts[:, 1])) / fh
                 feat["eye_w"] = (feat.pop("eye_w_l") + feat.pop("eye_w_r")) / 2.0
                 feat["eye_h"] = (feat.pop("eye_h_l") + feat.pop("eye_h_r")) / 2.0
             except Exception:
@@ -425,7 +425,9 @@ def build_scorer_stack(style: str = "auto",
         style = _detect_style(target, warnings)
 
     if style == "pixel":
-        return ScorerBuild(PixelScorer(), "pixel", warnings)
+        # PixelScorer 吃整图,最怕背景污染 —— 包一层零依赖的主体框裁剪
+        return ScorerBuild(CroppedScorer(PixelScorer(), bbox_from_background),
+                           "pixel", warnings)
 
     if style == "anime":
         parts: List[Tuple[Scorer, float]] = []
@@ -441,12 +443,14 @@ def build_scorer_stack(style: str = "auto",
             emb = _try(lambda: OnnxEmbeddingScorer(anime_onnx),
                        f"anime ONNX embedding({anime_onnx})", warnings)
             if emb is not None:
-                parts.append((emb, 1.0))
+                # ONNX embedding 也是整图 resize 进模型 —— 用 anime 人脸框裁剪
+                parts.append((CroppedScorer(emb, box_from_animeface), 1.0))
         if parts:
             scorer = parts[0][0] if len(parts) == 1 else CompositeScorer(parts)
             return ScorerBuild(scorer, "anime", warnings)
         warnings.append("anime 打分全灭,降级 pixel(分数只反映构图/影调,慎信)")
-        return ScorerBuild(PixelScorer(), "pixel", warnings)
+        return ScorerBuild(CroppedScorer(PixelScorer(), bbox_from_background),
+                           "pixel", warnings)
 
     if style == "real":
         arc = _try(ArcFaceScorer, "ArcFace(pip install -e '.[fit]')", warnings)
@@ -488,3 +492,106 @@ def _detect_style(target: Optional[np.ndarray], warnings: List[str]) -> str:
         warnings.append(f"真人探测不可用: {e}")
     warnings.append("两类检测器都没在目标图上检出脸,落到 pixel")
     return "pixel"
+
+
+# ---------------------------------------------------------------------------
+# 人脸对齐裁剪(v0.4)—— 别让背景/构图污染分数
+# ---------------------------------------------------------------------------
+#
+# 谁需要裁剪要想清楚,不是无脑全包:
+#   - ArcFaceScorer / GeometryScorer 内部本来就先做人脸检测(insightface 还
+#     自带 landmark 对齐),再包一层裁剪是白花一次检测;
+#   - **PixelScorer 和 OnnxEmbeddingScorer 是真正的受害者**:它们吃整张图,
+#     换个背景/灯光/构图分数就飘。给它们包 CroppedScorer。
+# 降级铁律不变:检测不到框就退回整图 + 计数,不 crash、不清零。
+
+def bbox_from_background(img: np.ndarray, tol: int = 24,
+                         margin: float = 0.12) -> Optional[Tuple[int, int, int, int]]:
+    """零依赖找主体框:与边框底色差超过 tol 的像素的包围盒。
+
+    对纯色背景的渲染图(mock、"证件照模式"拟合场景)非常好使;
+    对真实照片基本没用 —— 那是检测器的活,这个函数别越界。
+    返回 (x0, y0, x1, y1) 或 None(找不到主体)。
+    """
+    a = img.astype(np.int16)
+    border = np.concatenate([a[0].reshape(-1, 3), a[-1].reshape(-1, 3),
+                             a[:, 0].reshape(-1, 3), a[:, -1].reshape(-1, 3)])
+    bg = np.median(border, axis=0)
+    mask = np.abs(a - bg).sum(axis=2) > tol
+    if mask.sum() < 25:
+        return None
+    ys, xs = np.nonzero(mask)
+    h, w = img.shape[:2]
+    mx, my = int(margin * (xs.max() - xs.min())), int(margin * (ys.max() - ys.min()))
+    return (max(0, xs.min() - mx), max(0, ys.min() - my),
+            min(w, xs.max() + mx + 1), min(h, ys.max() + my + 1))
+
+
+def box_from_animeface(img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """animeface 人脸框(含 margin)。"""
+    import animeface
+    from PIL import Image
+
+    faces = animeface.detect(Image.fromarray(img))
+    if not faces:
+        return None
+    f = max(faces, key=lambda x: getattr(x, "likelihood", 0.0))
+    pos = getattr(getattr(f, "face", None), "pos", None)
+    if pos is None:
+        return None
+    h, w = img.shape[:2]
+    mx, my = int(0.25 * pos.width), int(0.25 * pos.height)
+    return (max(0, int(pos.x) - mx), max(0, int(pos.y) - my),
+            min(w, int(pos.x + pos.width) + mx),
+            min(h, int(pos.y + pos.height) + my))
+
+
+class CroppedScorer(Scorer):
+    """打分前把 target/candidate 都裁到主体框,再交给内层打分器。
+
+    box_fn(img) -> (x0,y0,x1,y1) | None。None 或异常 → 用整图(降级 + 计数)。
+    target 的框按 id 缓存,一次拟合只检测一次。
+    """
+
+    def __init__(self, inner: Scorer,
+                 box_fn: Callable[[np.ndarray], Optional[Tuple[int, int, int, int]]]) -> None:
+        self.inner = inner
+        self.box_fn = box_fn
+        self.name = f"crop({inner.name})"
+        self.crop_misses = 0
+        self._target_cache: Optional[Tuple[int, np.ndarray]] = None
+
+    def _crop(self, img: np.ndarray) -> np.ndarray:
+        try:
+            box = self.box_fn(img)
+        except Exception:
+            log.warning("crop box_fn failed on one image", exc_info=True)
+            box = None
+        if box is None:
+            self.crop_misses += 1
+            return img
+        x0, y0, x1, y1 = box
+        return img[y0:y1, x0:x1]
+
+    def score(self, target: np.ndarray, candidate: np.ndarray) -> float:
+        key = id(target)
+        if self._target_cache is None or self._target_cache[0] != key:
+            self._target_cache = (key, self._crop(target))
+        return self.inner.score(self._target_cache[1], self._crop(candidate))
+
+    def hints(self) -> List[str]:
+        return self.inner.hints()
+
+
+def find_geometry_scorer(scorer: Scorer) -> Optional[GeometryScorer]:
+    """从(可能嵌套的)打分器里挖出 GeometryScorer —— 先验要用它的 last_diff。"""
+    if isinstance(scorer, GeometryScorer):
+        return scorer
+    if isinstance(scorer, CroppedScorer):
+        return find_geometry_scorer(scorer.inner)
+    if isinstance(scorer, CompositeScorer):
+        for s, _ in scorer.parts:
+            g = find_geometry_scorer(s)
+            if g is not None:
+                return g
+    return None

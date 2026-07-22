@@ -4,7 +4,7 @@ An **MCP server + VaM plugin** that automates face creation in
 **Virt-A-Mate 1.22.0.3**: point it at a face photo and it drives the
 in-game morph sliders until the rendered face matches.
 
-> ⚠️ Status: **v0.3**. The offline layer (`.vap` read/write) is tested; the
+> ⚠️ Status: **v0.4**. The offline layer (`.vap` read/write) is tested; the
 > whole pipeline (bridge client ↔ protocol ↔ fitting ↔ export) is now
 > exercised end-to-end against the bundled **mock VaM** (`vamface-mock`,
 > 27 tests). What still needs a live VaM 1.22 pass is only the plugin-side
@@ -96,6 +96,25 @@ The geometry scorer also emits **directional hints** after the fit
 ("target eye spacing larger → Eyes Width Spacing ↑"), printed by the CLI
 and shown in the GUI — the black-box score says *how unlike*, the feature
 deltas say *what to change*.
+
+## Fitting quality (v0.4)
+
+Four things run before/around the optimizer, all on by default:
+
+- **Crop before scoring** — the whole-image scorers (pixel, user ONNX) are
+  cropped to the subject box so background/composition can't pollute the
+  score. ArcFace/geometry detect internally and are left alone.
+- **Expression neutralization** — expression-type morphs (smile/blink/…)
+  are zeroed before fitting so the loop can't cheat identity similarity
+  with a grin (`--no-neutralize` to skip).
+- **Geometry-prior seeding** — when the scorer stack has a landmark
+  geometry part, one probe evaluation turns feature deltas into an initial
+  morph seed and a coordinate order. Measured on the mock: evaluations to
+  reach score 0.95 dropped **35 → 14 (-60%)** — on a live VaM each saved
+  evaluation is a full screenshot round-trip (`--no-prior` to skip).
+- **Coarse-to-fine** — `--coarse-to-fine` fits contour groups
+  (skull/jaw/cheeks) first, freezes them, then features
+  (eyes/nose/mouth/ears); budget split by dimensionality.
 
 ## Mock VaM (test without VaM)
 

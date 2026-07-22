@@ -70,7 +70,7 @@ def load_image(path: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 from .scorers import (ArcFaceScorer, NullScorer, PixelScorer,  # noqa: F401
-                      Scorer, build_scorer_stack)
+                      Scorer, build_scorer_stack, find_geometry_scorer)
 
 
 def build_scorer() -> Tuple[Scorer, Optional[str]]:
@@ -107,6 +107,9 @@ class FitResult:
     style: Optional[str] = None          # 实际生效的打分风格(auto 解析后)
     scorer_name: Optional[str] = None    # 打分器组合的可读名
     hints: List[str] = field(default_factory=list)  # 几何差 → 方向性提示
+    prior_seed: Dict[str, float] = field(default_factory=dict)  # 先验给出的初始种子
+    neutralized: List[str] = field(default_factory=list)  # 拟合前清零的表情 morph
+    stage_count: int = 1                 # coarse-to-fine 的阶段数
 
 
 # ---------------------------------------------------------------------------
@@ -221,30 +224,152 @@ def cma_optimize(evaluate: Callable[[Dict[str, float]], float],
 # Top-level entry
 # ---------------------------------------------------------------------------
 
+def neutralize_expression(bridge: BridgeClient, atom: str) -> Dict[str, object]:
+    """拟合前清零表情类 morph,防"用表情凑相似度"的作弊解。
+
+    只动**已改动**且名字命中表情模式的 morph(get_morphs(changed_only=True)),
+    身份 morph 一律不碰。眼球朝向/头部姿态的归正是 storable 参数不是 morph,
+    属于真机验证清单(protocol.md)—— 这里不猜参数名。
+    """
+    from .morph_presets import is_expression_morph
+
+    changed = bridge.get_morphs(atom, changed_only=True)
+    targets = {n: 0.0 for n in changed if is_expression_morph(n)}
+    if targets:
+        bridge.set_morphs(atom, targets, clamp=True)
+    return {"zeroed": sorted(targets), "checked": len(changed)}
+
+
+# coarse-to-fine 的默认阶段划分:先定轮廓,冻结,再修五官
+DEFAULT_STAGES: List[List[str]] = [
+    ["skull", "jaw", "cheeks"],
+    ["eyes", "nose", "mouth", "ears"],
+]
+
+
+def _stage_name_lists(cfg: FitConfig, stages: List[List[str]]) -> List[List[str]]:
+    """分组名 → morph 名列表,并与 cfg.morph_names 求交(尊重用户的 groups 选择)。
+
+    cfg.morph_names 里不属于任何所选分组的名字(用户自定义 morph)归入末阶段。
+    """
+    from .morph_presets import FACE_MORPH_GROUPS
+
+    allowed = set(cfg.morph_names)
+    out: List[List[str]] = []
+    used: set = set()
+    for groups in stages:
+        names = [n for g in groups for n in FACE_MORPH_GROUPS.get(g, [])
+                 if n in allowed and n not in used]
+        used.update(names)
+        if names:
+            out.append(names)
+    leftovers = [n for n in cfg.morph_names if n not in used]
+    if leftovers:
+        if out:
+            out[-1].extend(leftovers)
+        else:
+            out.append(leftovers)
+    return out
+
+
 def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
              optimizer: str = "cma", style: str = "auto",
-             anime_onnx: Optional[str] = None) -> FitResult:
-    """style: auto | real | anime | pixel(见 scorers.build_scorer_stack)。"""
+             anime_onnx: Optional[str] = None,
+             scorer: Optional[Scorer] = None,
+             use_prior: bool = True, neutralize: bool = True,
+             coarse_to_fine: bool = False,
+             stages: Optional[List[List[str]]] = None) -> FitResult:
+    """v0.4 拟合入口:表情归一化 → 先验探针 → (分阶段)黑盒优化 → 提示。
+
+    style: auto | real | anime | pixel(见 scorers.build_scorer_stack)
+    scorer: 直接注入打分器(测试/自定义用);给了就跳过 build_scorer_stack
+    use_prior: 打分器里有 GeometryScorer 时,先做一次基线评估拿特征差,
+               换算成初始种子(CMA x0 / greedy 起点+坐标顺序)。探针那次
+               评估计入预算和 history[0]。
+    neutralize: 拟合前清零表情类 morph(失败只警告,不阻塞)
+    coarse_to_fine: 按 DEFAULT_STAGES 两阶段(轮廓→五官),预算按维数分摊
+    stages: 自定义阶段(分组名列表的列表),给了则覆盖 coarse_to_fine
+    """
+    from .priors import order_by_prior, seed_from_diff
+
     target = load_image(target_image_path)
-    build = build_scorer_stack(style, target=target, anime_onnx=anime_onnx)
-    scorer = build.scorer
+    if scorer is None:
+        build = build_scorer_stack(style, target=target, anime_onnx=anime_onnx)
+        scorer, eff_style, warning = build.scorer, build.style, build.warning
+    else:
+        eff_style, warning = getattr(scorer, "name", "custom"), None
     if isinstance(scorer, ArcFaceScorer):
         scorer.set_target(target)
 
+    neutralized: List[str] = []
+    if neutralize:
+        try:
+            neutralized = list(neutralize_expression(bridge, cfg.atom)["zeroed"])
+        except Exception:
+            log.warning("expression neutralization failed (ignored)", exc_info=True)
+
     evaluate = make_evaluator(bridge, target, scorer, cfg)
 
-    if optimizer == "greedy":
-        result = greedy_coordinate(evaluate, cfg)
-    elif optimizer == "cma":
-        result = cma_optimize(evaluate, cfg)
-    else:
-        raise ValueError(f"unknown optimizer: {optimizer}")
+    # ---- 先验探针:一次基线评估 → 特征差 → 初始种子 ------------------------
+    seed: Dict[str, float] = dict(cfg.seed or {})
+    prior_seed: Dict[str, float] = {}
+    history_all: List[float] = []
+    budget = cfg.max_iters
+    geo = find_geometry_scorer(scorer) if use_prior else None
+    if geo is not None and budget > 1:
+        base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+        history_all.append(evaluate(base_vals))
+        budget -= 1
+        if geo.last_diff:
+            prior_seed = seed_from_diff(
+                geo.last_diff, cfg.morph_names,
+                bounds_fn=lambda n: _bounds_for(cfg, n))
+            for k, v in prior_seed.items():
+                seed.setdefault(k, v)  # 用户显式给的种子优先于先验
+
+    # ---- 阶段划分与预算分摊 --------------------------------------------------
+    if stages is None and coarse_to_fine:
+        stages = DEFAULT_STAGES
+    stage_names = (_stage_name_lists(cfg, stages) if stages
+                   else [list(cfg.morph_names)])
+    total_dims = sum(len(ns) for ns in stage_names) or 1
+
+    best_morphs: Dict[str, float] = {}
+    best_score = -1e9
+    for i, names in enumerate(stage_names):
+        stage_budget = max(8, int(round(budget * len(names) / total_dims))) \
+            if len(stage_names) > 1 else budget
+        sub = FitConfig(
+            atom=cfg.atom,
+            morph_names=order_by_prior(names, seed),
+            bounds=cfg.bounds, default_bound=cfg.default_bound,
+            max_iters=stage_budget, screenshot_width=cfg.screenshot_width,
+            seed={n: seed.get(n, 0.0) for n in names},
+            on_eval=cfg.on_eval)
+        if optimizer == "greedy":
+            res = greedy_coordinate(evaluate, sub)
+        elif optimizer == "cma":
+            res = cma_optimize(evaluate, sub)
+        else:
+            raise ValueError(f"unknown optimizer: {optimizer}")
+        history_all.extend(res.history)
+        best_morphs.update(res.best_morphs)
+        best_score = res.best_score
+        # 冻结本阶段最优:让后续阶段在它之上评估(set_morphs 是增量语义)
+        bridge.set_morphs(cfg.atom, res.best_morphs, clamp=True)
+        # 阶段间刷新先验:用最新残差修正后续阶段的种子与顺序
+        if geo is not None and geo.last_diff and i + 1 < len(stage_names):
+            for k, v in seed_from_diff(geo.last_diff, cfg.morph_names,
+                                       bounds_fn=lambda n: _bounds_for(cfg, n)).items():
+                seed.setdefault(k, v)
 
     # leave VaM showing the best result
-    bridge.set_morphs(cfg.atom, result.best_morphs, clamp=True)
-    result.warning = build.warning
-    result.style = build.style
-    result.scorer_name = scorer.name
+    bridge.set_morphs(cfg.atom, best_morphs, clamp=True)
+    result = FitResult(best_score=best_score, best_morphs=best_morphs,
+                       history=history_all, warning=warning,
+                       style=eff_style, scorer_name=scorer.name,
+                       prior_seed=prior_seed, neutralized=neutralized,
+                       stage_count=len(stage_names))
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

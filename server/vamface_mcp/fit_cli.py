@@ -42,6 +42,12 @@ def main(argv=None) -> int:
                              "anime=animeface 几何 / pixel=像素(mock 测试用)")
     parser.add_argument("--anime-onnx", default=None,
                         help="可选: anime 识别 ONNX 模型路径(style=anime 时加权合入)")
+    parser.add_argument("--coarse-to-fine", action="store_true",
+                        help="两阶段拟合: 先轮廓(skull/jaw/cheeks)冻结,再五官")
+    parser.add_argument("--no-prior", action="store_true",
+                        help="禁用几何先验种子(默认开; 需要打分器里有几何项)")
+    parser.add_argument("--no-neutralize", action="store_true",
+                        help="拟合前不清零表情类 morph(默认清零防作弊解)")
     parser.add_argument("--iters", type=int, default=60, help="evaluation budget")
     parser.add_argument("--groups", nargs="*", choices=sorted(FACE_MORPH_GROUPS),
                         help="morph regions to optimize (default: all)")
@@ -82,14 +88,22 @@ def main(argv=None) -> int:
     t0 = time.time()
     try:
         result = fit_face(bridge, str(photo), cfg, optimizer=args.optimizer,
-                          style=args.style, anime_onnx=args.anime_onnx)
+                          style=args.style, anime_onnx=args.anime_onnx,
+                          use_prior=not args.no_prior,
+                          neutralize=not args.no_neutralize,
+                          coarse_to_fine=args.coarse_to_fine)
     except BridgeError as e:
         print(f"error during fit: {e}", file=sys.stderr)
         return 1
 
     elapsed = time.time() - t0
     print(f"done in {elapsed:.0f}s — best score: {result.best_score:.4f} "
-          f"(style={result.style}, scorer={result.scorer_name})")
+          f"(style={result.style}, scorer={result.scorer_name}, "
+          f"stages={result.stage_count})")
+    if result.neutralized:
+        print(f"  已清零表情 morph: {', '.join(result.neutralized)}")
+    if result.prior_seed:
+        print(f"  先验种子: {json.dumps(result.prior_seed, ensure_ascii=False)}")
     for h in result.hints:
         print(f"  提示: {h}")
     if result.warning:

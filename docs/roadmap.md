@@ -10,15 +10,27 @@
       in `plugin/VamFaceBridge.cs` (see `docs/protocol.md` for the list)
 
 ## v0.2 — make the loop actually good
-- [ ] Face alignment/crop before scoring (both target and render), so the
-      identity score isn't polluted by pose/background. Use the detector's
-      landmarks to crop a canonical face box.
-- [ ] Neutralize pose/expression on the VaM side before each capture
-      (zero jaw rotation, eyes forward, neutral expression) for a fair compare.
-- [ ] Coarse-to-fine: optimize `skull`+`jaw` groups first, freeze, then
-      `eyes`/`nose`/`mouth`. Fewer dims per stage = faster convergence.
+- [x] *(shipped in v0.4)* Face crop before scoring for the whole-image
+      scorers (pixel / user ONNX). Note: ArcFace & landmark geometry
+      detect+align internally, so the v0.2 wording overstated the debt —
+      the truly polluted paths were pixel/onnx, and those are now cropped
+      (`CroppedScorer`, `bbox_from_background`, `box_from_animeface`).
+- [x] *(shipped in v0.4)* Neutralize expression morphs before fitting
+      (`neutralize_expression`, pattern-based, identity morphs untouched).
+      Eye-gaze/head-pose reset is a storable param → live-validation list.
+- [x] *(shipped in v0.4)* Coarse-to-fine staged fitting (contour groups →
+      freeze → feature groups), budget split by dimensionality.
 - [ ] Multi-view scoring (front + 3/4) to avoid overfitting to one angle.
 - [ ] Cache screenshots keyed by morph vector hash to skip re-renders.
+
+## v0.4 (shipped) — fitting-quality four-pack + CI
+- [x] Geometry-prior seeding: one probe evaluation → feature deltas →
+      optimizer seed (CMA x0 / greedy start + coordinate order), gains
+      calibrated against measured mock feature-morph slopes.
+      **Measured on the mock: evals-to-0.95 dropped 35 → 14 (-60%).**
+- [x] The three v0.2 debts above (crop / neutralize / coarse-to-fine).
+- [x] GitHub Actions CI: full suite (43 tests) on Python 3.10 & 3.12,
+      every push — the mock made tests dependency-light enough for CI.
 
 ## v0.3 (shipped) — scorer stack + mock VaM
 - [x] Switchable scorer styles: real / anime / pixel / auto, all with

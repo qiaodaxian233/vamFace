@@ -186,7 +186,9 @@ def vam_fit_face(target_image: str, atom: str = "Person",
                  optimizer: str = "cma", max_iters: int = 60,
                  groups: Optional[List[str]] = None,
                  save_vap: bool = True, style: str = "auto",
-                 anime_onnx: Optional[str] = None) -> Dict[str, Any]:
+                 anime_onnx: Optional[str] = None,
+                 use_prior: bool = True, neutralize: bool = True,
+                 coarse_to_fine: bool = False) -> Dict[str, Any]:
     """Automatically fit the VaM face to a target photo.
 
     Runs a black-box optimization loop: set morphs -> screenshot ->
@@ -206,6 +208,12 @@ def vam_fit_face(target_image: str, atom: str = "Person",
              for mock-server testing).
       anime_onnx: optional path to a user-supplied anime face-recognition
              ONNX model, blended into the anime scorer.
+      use_prior: seed the optimizer from geometry feature deltas (one probe
+             evaluation; only when the scorer stack has a geometry part).
+      neutralize: zero expression-type morphs before fitting so the loop
+             can't cheat identity similarity with a smile.
+      coarse_to_fine: two-stage fit — contour groups (skull/jaw/cheeks)
+             first, frozen, then features (eyes/nose/mouth/ears).
 
     NOTE: if no identity scorer is installed (insightface), the score is a
     placeholder 0.0 and `warning` will say so — the loop still runs but the
@@ -227,7 +235,9 @@ def vam_fit_face(target_image: str, atom: str = "Person",
             max_iters=max_iters,
         )
         result = fit_face(_bridge, target_image, cfg, optimizer=optimizer,
-                          style=style, anime_onnx=anime_onnx)
+                          style=style, anime_onnx=anime_onnx,
+                          use_prior=use_prior, neutralize=neutralize,
+                          coarse_to_fine=coarse_to_fine)
 
         out: Dict[str, Any] = {
             "ok": True,
@@ -236,9 +246,14 @@ def vam_fit_face(target_image: str, atom: str = "Person",
             "scorer": result.scorer_name,
             "morph_count": len(result.best_morphs),
             "iterations": len(result.history),
+            "stages": result.stage_count,
         }
         if result.hints:
             out["hints"] = result.hints
+        if result.neutralized:
+            out["neutralized_expressions"] = result.neutralized
+        if result.prior_seed:
+            out["prior_seed"] = result.prior_seed
         if result.warning:
             out["warning"] = result.warning
         if save_vap:

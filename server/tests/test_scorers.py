@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from vamface_mcp.scorers import (CompositeScorer, GeometryScorer, NullScorer,
-                                 PixelScorer, build_scorer_stack)
+from vamface_mcp.scorers import (CompositeScorer, CroppedScorer, GeometryScorer,
+                                 NullScorer, PixelScorer, build_scorer_stack)
 
 
 def _img(seed: int) -> np.ndarray:
@@ -114,7 +114,9 @@ def test_composite_weighted_mean_and_hint_merge():
 
 def test_build_pixel_style():
     b = build_scorer_stack("pixel")
-    assert isinstance(b.scorer, PixelScorer)
+    # v0.4: pixel 打分器带主体框裁剪,防背景/构图污染分数
+    assert isinstance(b.scorer, CroppedScorer)
+    assert isinstance(b.scorer.inner, PixelScorer)
     assert b.style == "pixel"
 
 
@@ -129,7 +131,8 @@ def test_build_never_raises_and_degrades_with_warning():
         assert isinstance(b_real.scorer, NullScorer)
         assert b_real.warning
     if importlib.util.find_spec("animeface") is None:
-        assert isinstance(b_anime.scorer, PixelScorer)  # anime 降到 pixel
+        assert isinstance(b_anime.scorer, CroppedScorer)  # anime 降到 pixel(带裁剪)
+        assert isinstance(b_anime.scorer.inner, PixelScorer)
         assert b_anime.warning
 
 

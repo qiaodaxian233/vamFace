@@ -70,3 +70,26 @@ def default_bounds(name: str) -> Tuple[float, float]:
     if "scale" in lname or "size" in lname:
         return (-0.6, 0.8)
     return (-1.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 表情归一化(v0.4)
+# ---------------------------------------------------------------------------
+# 拟合比的是**身份**,不是表情。目标图咧嘴笑时,优化器很乐意用"Smile"类
+# morph 去凑相似度 —— 这是作弊解:预设存下来的是一张永远在笑的脸。
+# 所以拟合前把表情类 morph 清零。匹配走小写子串,宁可多匹配也别漏
+# (身份 morph 命中这些词的概率极低,精选子集里一个都没有)。
+EXPRESSION_PATTERNS = [
+    "smile", "frown", "grin", "laugh", "cry", "pout", "kiss",
+    "angry", "anger", "sad", "happy", "fear", "afraid", "disgust",
+    "surprise", "shock", "concentrate", "flirt", "desire", "pain",
+    "blink", "wink", "squint", "eyes closed", "eye closed",
+    "brow up", "brow down", "brows up", "brows down",
+    "mouth open", "open mouth", "jaw open", "tongue",
+    "snarl", "sneer", "smirk", "scream", "yawn",
+]
+
+
+def is_expression_morph(name: str) -> bool:
+    lname = name.lower()
+    return any(p in lname for p in EXPRESSION_PATTERNS)
