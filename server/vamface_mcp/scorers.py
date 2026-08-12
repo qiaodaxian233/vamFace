@@ -114,18 +114,24 @@ class PixelScorer(Scorer):
 # 提取器签名统一:extractor(img) -> Optional[FeatureDict]
 # 检出失败返回 None(不是异常)。不同后端能给的键不一样,比较时只比交集。
 
-# 特征差 → morph 调整方向的映射(给人看的提示,也是日后先验优化的接口)
+# 特征差 → 提示的中文名与方向附注。
+# v0.5.4 起:**morph 名和箭头方向不再写死在字符串里**,渲染时从
+# priors.FEATURE_TO_MORPHS 的增益符号推导(Δ>0 且 gain>0 → ↑,以此类推)。
+# 方向只有一个真相源,"两张表同步改"的 grep 规矩作废。
+# 这也让提示能按目标 VaM 的实际可用性过滤/改名(见
+# GeometryScorer.set_morph_availability)—— 真机第三跑抓到的 bug:
+# 提示推荐了 missing 列表里的 morph,推荐一根不存在的滑块。
 _HINT_MAP: Dict[str, Tuple[str, str, str]] = {
-    # feature: (中文名, Δ>0 时的建议, Δ<0 时的建议)
-    "eye_gap": ("两眼间距", "Eyes Width Spacing ↑", "Eyes Width Spacing ↓"),
-    "eye_w": ("眼睛大小(宽)", "Eyes Size ↑", "Eyes Size ↓"),
-    "eye_h": ("眼睛开度(高)", "Eyes Size ↑ / Eyelids Height ↓", "Eyelids Height ↑"),
-    "eye_y": ("眼睛位置", "Eyes Height ↓(眼更靠下)", "Eyes Height ↑(眼更靠上)"),
-    "nose_len": ("鼻长", "Nose Size/Height ↑", "Nose Size/Height ↓"),
-    "mouth_w": ("嘴宽", "Mouth Width / Lips Width ↑", "Mouth Width / Lips Width ↓"),
-    "mouth_y": ("嘴位置", "Mouth Height ↓(嘴更靠下)", "Mouth Height ↑(嘴更靠上)"),
-    "jaw_len": ("下巴长度", "Chin Height / Jaw Size ↑", "Chin Height / Jaw Size ↓"),
-    "face_aspect": ("脸型长宽比", "Face Long ↑ / Face Round ↓", "Face Round ↑ / Face Long ↓"),
+    # feature: (中文名, Δ>0 附注, Δ<0 附注)
+    "eye_gap": ("两眼间距", "", ""),
+    "eye_w": ("眼睛大小(宽)", "", ""),
+    "eye_h": ("眼睛开度(高)", "", ""),
+    "eye_y": ("眼睛位置", "(眼更靠下)", "(眼更靠上)"),
+    "nose_len": ("鼻长", "", ""),
+    "mouth_w": ("嘴宽", "", ""),
+    "mouth_y": ("嘴位置", "(嘴更靠下)", "(嘴更靠上)"),
+    "jaw_len": ("下巴长度", "", ""),
+    "face_aspect": ("脸型长宽比", "", ""),
 }
 
 
@@ -246,6 +252,20 @@ class GeometryScorer(Scorer):
         self._target_cache: Optional[Tuple[int, Optional[FeatureDict]]] = None
         self.last_diff: FeatureDict = {}   # 最近一次 candidate 相对 target 的差
         self.detect_misses = 0             # candidate 检不出脸的累计次数
+        # 目标 VaM 的 morph 可用性(None = 未知,不过滤)与 概念名→实际名 改名表
+        self._avail_norm: Optional[set] = None
+        self._hint_rename: Dict[str, str] = {}
+
+    def set_morph_availability(self, available=None, rename=None) -> None:
+        """告知目标 VaM 实际有哪些 morph(hints 据此过滤/改名)。
+
+        available: 实际 morph 名的可迭代;None = 恢复"不过滤"
+        rename: 概念名 → 实际名(别名解析的产物),提示里显示实际名
+        """
+        from .morph_presets import norm_name
+        self._avail_norm = ({norm_name(n) for n in available}
+                            if available is not None else None)
+        self._hint_rename = dict(rename or {})
 
     def _extract(self, img: np.ndarray) -> Optional[FeatureDict]:
         # 依赖缺失在构建期就被拦下了;这里的异常是单张图上的检测器抖动,
@@ -279,12 +299,31 @@ class GeometryScorer(Scorer):
         return float(np.exp(-self.sharpness * num / den))
 
     def hints(self, threshold: float = 0.02) -> List[str]:
+        from .morph_presets import norm_name
+        from .priors import FEATURE_TO_MORPHS
         out: List[str] = []
         for k, d in sorted(self.last_diff.items(), key=lambda kv: -abs(kv[1])):
             if abs(d) < threshold or k not in _HINT_MAP:
                 continue
-            zh, pos, neg = _HINT_MAP[k]
-            out.append(f"{zh}差 {d:+.3f} → {pos if d > 0 else neg}")
+            zh, note_pos, note_neg = _HINT_MAP[k]
+            note = note_pos if d > 0 else note_neg
+            moves: List[str] = []
+            dropped: List[str] = []
+            for name, gain in FEATURE_TO_MORPHS.get(k, []):
+                shown = self._hint_rename.get(name, name)
+                if (self._avail_norm is not None
+                        and norm_name(shown) not in self._avail_norm):
+                    dropped.append(shown)
+                    continue
+                up = (gain > 0) == (d > 0)
+                moves.append(f"{shown} {'↑' if up else '↓'}")
+            if moves:
+                out.append(f"{zh}差 {d:+.3f} → {' / '.join(moves)}{note}")
+            elif dropped:
+                out.append(f"{zh}差 {d:+.3f} → 对应 morph 你的 VaM 缺失"
+                           f"({' / '.join(dropped)}),没法自动修")
+            else:
+                out.append(f"{zh}差 {d:+.3f}{note}")
         return out
 
 

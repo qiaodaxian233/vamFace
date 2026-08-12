@@ -159,6 +159,10 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
         status += f"\n⚠️ {result.warning}"
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.renamed:
+        pairs = ", ".join(f"{k}→{v}" for k, v in sorted(result.renamed.items()))
+        status += (f"\n🔁 别名解析生效 {len(result.renamed)} 个"
+                   f"(概念名→你 VaM 里的实际名): {pairs}")
     if result.missing:
         status += (f"\n⚠️ 目标 VaM 缺 {len(result.missing)} 个精选 morph"
                    f"(未参与拟合): {', '.join(result.missing)}\n"

@@ -232,7 +232,11 @@ def test_coarse_to_fine_two_stages_cover_all_and_fit(bridge, tmp_path):
 
 
 def test_custom_stages_and_leftover_names(bridge, tmp_path):
-    """用户自定义 morph(不属于任何分组)必须归入末阶段,不丢维度。"""
+    """用户自定义 morph:能解析的归入末阶段;解析确认不存在的是死维度。
+
+    v0.5.4 契约变更:桥接给得出**完整** morph 名单时,解析不到的名字
+    不再进搜索烧预算(之前会带着死维度跑完全程),改为剔除 + 报 missing。
+    """
     target = _target_png(tmp_path, {"Nose Width": 0.5})
     cfg = FitConfig(morph_names=["Nose Width", "自定义Morph不存在"],
                     bounds={}, max_iters=20, screenshot_width=192)
@@ -240,7 +244,9 @@ def test_custom_stages_and_leftover_names(bridge, tmp_path):
                       style="pixel", use_prior=False,
                       stages=[["nose"]])
     assert result.stage_count == 1
-    assert "自定义Morph不存在" in result.best_morphs  # 进了搜索(mock 报 missing 不炸)
+    assert "Nose Width" in result.best_morphs          # 真维度照常参与
+    assert "自定义Morph不存在" not in result.best_morphs  # 死维度剔除,不烧预算
+    assert "自定义Morph不存在" in result.missing          # 但要报给用户
 
 
 def test_default_stages_definition():

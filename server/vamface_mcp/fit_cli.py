@@ -128,6 +128,9 @@ def main(argv=None) -> int:
         if "NullScorer" in result.warning:
             print("         (score above is a placeholder; install extras: "
                   "pip install -e '.[fit]')", file=sys.stderr)
+    if result.renamed:
+        pairs = ", ".join(f"{k}→{v}" for k, v in sorted(result.renamed.items()))
+        print(f"  别名解析生效 {len(result.renamed)} 个(概念名→实际名): {pairs}")
     if result.missing:
         print(f"  目标 VaM 缺 {len(result.missing)} 个精选 morph(未参与拟合):")
         print(f"  {', '.join(result.missing)}")

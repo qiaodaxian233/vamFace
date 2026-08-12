@@ -113,6 +113,7 @@ class FitResult:
     stage_count: int = 1                 # coarse-to-fine 的阶段数
     cache_hits: int = 0                  # 截图缓存命中次数(省下的真机来回)
     missing: List[str] = field(default_factory=list)  # 目标 VaM 缺的精选 morph 名
+    renamed: Dict[str, str] = field(default_factory=dict)  # 别名解析:概念名→实际名
 
 
 # ---------------------------------------------------------------------------
@@ -294,20 +295,28 @@ DEFAULT_STAGES: List[List[str]] = [
 ]
 
 
-def _stage_name_lists(cfg: FitConfig, stages: List[List[str]]) -> List[List[str]]:
+def _stage_name_lists(cfg: FitConfig, stages: List[List[str]],
+                      rename: Optional[Dict[str, str]] = None) -> List[List[str]]:
     """分组名 → morph 名列表,并与 cfg.morph_names 求交(尊重用户的 groups 选择)。
 
     cfg.morph_names 里不属于任何所选分组的名字(用户自定义 morph)归入末阶段。
+    rename: 概念名 → 实际名(别名解析产物)。分组表存的是概念名,
+    cfg.morph_names 解析后是实际名,交集前先翻译。
     """
     from .morph_presets import FACE_MORPH_GROUPS
 
+    ren = rename or {}
     allowed = set(cfg.morph_names)
     out: List[List[str]] = []
     used: set = set()
     for groups in stages:
-        names = [n for g in groups for n in FACE_MORPH_GROUPS.get(g, [])
-                 if n in allowed and n not in used]
-        used.update(names)
+        names = []
+        for g in groups:
+            for n in FACE_MORPH_GROUPS.get(g, []):
+                a = ren.get(n, n)
+                if a in allowed and a not in used:
+                    names.append(a)
+                    used.add(a)
         if names:
             out.append(names)
     leftovers = [n for n in cfg.morph_names if n not in used]
@@ -348,6 +357,40 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     if isinstance(scorer, ArcFaceScorer):
         scorer.set_target(target)
 
+    # ---- 别名解析(v0.5.4):概念名 → 目标 VaM 实际 morph 名 -----------------
+    # 解析不到的概念是死维度,进搜索只烧预算不产出 —— 从优化范围里剔除,
+    # 记进 missing。list_morphs 失败或名单被 limit 截断时跳过解析,按原名
+    # 硬试(missing 仍由 set_morphs 回执兜底收集)—— 猜测值不当阻塞器。
+    canonical_names = list(cfg.morph_names)
+    resolution = None
+    try:
+        reply = bridge.list_morphs(cfg.atom, limit=1_000_000)
+        rows = reply.get("morphs") or []
+        available = [str(r.get("name")) for r in rows if r.get("name")]
+        total = int(reply.get("total", len(available)))
+        if available and len(available) >= total:
+            from .morph_presets import resolve_names
+            resolution = resolve_names(canonical_names, available)
+    except Exception:
+        log.warning("别名解析跳过(list_morphs 不可用),按原名硬试", exc_info=True)
+
+    to_act = resolution.actual if resolution is not None else (lambda n: n)
+    unresolved: List[str] = list(resolution.unresolved) if resolution else []
+    renamed: Dict[str, str] = dict(resolution.renamed) if resolution else {}
+    if resolution is not None and (unresolved or renamed):
+        from dataclasses import replace as _dc_replace
+        cfg = _dc_replace(
+            cfg,
+            morph_names=resolution.to_actual(canonical_names),
+            bounds={to_act(k): v for k, v in cfg.bounds.items()},
+            seed=({to_act(k): v for k, v in cfg.seed.items()}
+                  if cfg.seed else cfg.seed))
+    # hints 按实际可用性过滤/改名(修真机第三跑的 bug:提示推荐不存在的滑块)
+    if resolution is not None:
+        geo_h = find_geometry_scorer(scorer)
+        if geo_h is not None:
+            geo_h.set_morph_availability(available, rename=renamed)
+
     neutralized: List[str] = []
     if neutralize:
         try:
@@ -356,8 +399,18 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             log.warning("expression neutralization failed (ignored)", exc_info=True)
 
     evaluate = make_evaluator(bridge, target, scorer, cfg)
+    evaluate.missing.update(unresolved)  # 解析阶段就确认缺失的,不用等回执
 
     # ---- 先验探针:一次基线评估 → 特征差 → 初始种子 ------------------------
+    # FEATURE_TO_MORPHS 用概念名,产出的种子键要过 to_act 翻译成实际名。
+    allowed_actual = set(cfg.morph_names)
+
+    def _prior(diff: Dict[str, float]) -> Dict[str, float]:
+        raw = seed_from_diff(diff, canonical_names,
+                             bounds_fn=lambda n: _bounds_for(cfg, to_act(n)))
+        return {to_act(k): v for k, v in raw.items()
+                if to_act(k) in allowed_actual}
+
     seed: Dict[str, float] = dict(cfg.seed or {})
     prior_seed: Dict[str, float] = {}
     history_all: List[float] = []
@@ -368,16 +421,14 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
         history_all.append(evaluate(base_vals))
         budget -= 1
         if geo.last_diff:
-            prior_seed = seed_from_diff(
-                geo.last_diff, cfg.morph_names,
-                bounds_fn=lambda n: _bounds_for(cfg, n))
+            prior_seed = _prior(geo.last_diff)
             for k, v in prior_seed.items():
                 seed.setdefault(k, v)  # 用户显式给的种子优先于先验
 
     # ---- 阶段划分与预算分摊 --------------------------------------------------
     if stages is None and coarse_to_fine:
         stages = DEFAULT_STAGES
-    stage_names = (_stage_name_lists(cfg, stages) if stages
+    stage_names = (_stage_name_lists(cfg, stages, rename=renamed) if stages
                    else [list(cfg.morph_names)])
     total_dims = sum(len(ns) for ns in stage_names) or 1
 
@@ -408,8 +459,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
         evaluate.bump_epoch()  # 绕过 evaluate 写了状态,旧缓存作废
         # 阶段间刷新先验:用最新残差修正后续阶段的种子与顺序
         if geo is not None and geo.last_diff and i + 1 < len(stage_names):
-            for k, v in seed_from_diff(geo.last_diff, cfg.morph_names,
-                                       bounds_fn=lambda n: _bounds_for(cfg, n)).items():
+            for k, v in _prior(geo.last_diff).items():
                 seed.setdefault(k, v)
 
     # leave VaM showing the best result
@@ -420,7 +470,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        prior_seed=prior_seed, neutralized=neutralized,
                        stage_count=len(stage_names),
                        cache_hits=evaluate.cache_hits,
-                       missing=sorted(evaluate.missing))
+                       missing=sorted(evaluate.missing),
+                       renamed=renamed)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)
