@@ -23,7 +23,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO;
+// NOTE(sandbox, verified live 2026-08-12 on VaM 1.22.0.3):
+// VaM's plugin sandbox scans the compiled assembly and PROHIBITS the whole
+// System.IO namespace (SecurityException: NamespaceRestriction). That bans
+// NetworkStream-as-Stream usage, StreamReader/Writer, MemoryStream, File,
+// Path... Networking below therefore uses the raw Socket byte[] API
+// (System.Net.Sockets only) with manual newline framing.
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -35,7 +40,7 @@ namespace VamFace
 {
     public class VamFaceBridge : MVRScript
     {
-        private const string VERSION = "0.5.0";
+        private const string VERSION = "0.5.1";
         // 与 server 端 vamface_mcp.PROTOCOL_VERSION 对账,改协议时两边同步 +1。
         private const int PROTOCOL = 1;
         private const int DEFAULT_PORT = 8787;
@@ -64,10 +69,13 @@ namespace VamFace
 
         private class ClientConn
         {
-            public TcpClient client;
-            public NetworkStream stream;
+            public Socket socket;
             public readonly object writeLock = new object();
             public volatile bool alive = true;
+            // Receive-side accumulator for newline framing. Only touched by
+            // this connection's reader thread, so no lock needed.
+            public byte[] acc = new byte[4096];
+            public int accLen = 0;
 
             public void SendLine(string line)
             {
@@ -76,8 +84,14 @@ namespace VamFace
                     byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
                     lock (writeLock)
                     {
-                        stream.Write(bytes, 0, bytes.Length);
-                        stream.Flush();
+                        int sent = 0;
+                        while (sent < bytes.Length)
+                        {
+                            int n = socket.Send(bytes, sent, bytes.Length - sent,
+                                                SocketFlags.None);
+                            if (n <= 0) throw new SocketException();
+                            sent += n;
+                        }
                     }
                 }
                 catch (Exception)
@@ -141,7 +155,7 @@ namespace VamFace
             {
                 for (int i = 0; i < _clients.Count; i++)
                 {
-                    try { _clients[i].client.Close(); } catch (Exception) { }
+                    try { _clients[i].socket.Close(); } catch (Exception) { }
                 }
                 _clients.Clear();
             }
@@ -167,10 +181,10 @@ namespace VamFace
             {
                 try
                 {
-                    TcpClient client = _listener.AcceptTcpClient();
+                    Socket sock = _listener.AcceptSocket();
+                    sock.NoDelay = true;  // request/reply JSON lines - don't batch
                     ClientConn conn = new ClientConn();
-                    conn.client = client;
-                    conn.stream = client.GetStream();
+                    conn.socket = sock;
                     lock (_clients) { _clients.Add(conn); }
 
                     Thread reader = new Thread(delegate () { ReadLoop(conn); });
@@ -186,39 +200,74 @@ namespace VamFace
 
         private void ReadLoop(ClientConn conn)
         {
-            StreamReader reader = new StreamReader(conn.stream, Encoding.UTF8);
+            byte[] buf = new byte[8192];
             try
             {
                 while (_running && conn.alive)
                 {
-                    string line = reader.ReadLine();
-                    if (line == null) break;
-                    line = line.Trim();
-                    if (line.Length == 0) continue;
+                    int n = conn.socket.Receive(buf, 0, buf.Length, SocketFlags.None);
+                    if (n <= 0) break;
 
-                    JSONClass json = null;
-                    try { json = JSON.Parse(line) as JSONClass; }
-                    catch (Exception) { }
-
-                    if (json == null)
+                    // Grow the accumulator if needed.
+                    if (conn.accLen + n > conn.acc.Length)
                     {
-                        conn.SendLine("{\"ok\":false,\"error\":\"invalid json\"}");
-                        continue;
+                        int cap = conn.acc.Length * 2;
+                        while (cap < conn.accLen + n) cap *= 2;
+                        byte[] bigger = new byte[cap];
+                        Array.Copy(conn.acc, 0, bigger, 0, conn.accLen);
+                        conn.acc = bigger;
                     }
+                    Array.Copy(buf, 0, conn.acc, conn.accLen, n);
+                    conn.accLen += n;
 
-                    PendingRequest req = new PendingRequest();
-                    req.json = json;
-                    req.conn = conn;
-                    lock (_queueLock) { _pending.Enqueue(req); }
+                    // Extract complete lines. '\n' (0x0A) never occurs inside
+                    // a UTF-8 multibyte sequence, so byte-level scan is safe.
+                    int start = 0;
+                    for (int i = 0; i < conn.accLen; i++)
+                    {
+                        if (conn.acc[i] != (byte)'\n') continue;
+                        int len = i - start;
+                        if (len > 0 && conn.acc[start + len - 1] == (byte)'\r') len--;
+                        if (len > 0)
+                        {
+                            string line = Encoding.UTF8.GetString(conn.acc, start, len).Trim();
+                            if (line.Length > 0) HandleLine(conn, line);
+                        }
+                        start = i + 1;
+                    }
+                    if (start > 0)
+                    {
+                        int remain = conn.accLen - start;
+                        if (remain > 0) Array.Copy(conn.acc, start, conn.acc, 0, remain);
+                        conn.accLen = remain;
+                    }
                 }
             }
             catch (Exception) { }
             finally
             {
                 conn.alive = false;
-                try { conn.client.Close(); } catch (Exception) { }
+                try { conn.socket.Close(); } catch (Exception) { }
                 lock (_clients) { _clients.Remove(conn); }
             }
+        }
+
+        private void HandleLine(ClientConn conn, string line)
+        {
+            JSONClass json = null;
+            try { json = JSON.Parse(line) as JSONClass; }
+            catch (Exception) { }
+
+            if (json == null)
+            {
+                conn.SendLine("{\"ok\":false,\"error\":\"invalid json\"}");
+                return;
+            }
+
+            PendingRequest req = new PendingRequest();
+            req.json = json;
+            req.conn = conn;
+            lock (_queueLock) { _pending.Enqueue(req); }
         }
 
         // ------------------------------------------------------------------
