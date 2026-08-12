@@ -115,6 +115,7 @@ class FitResult:
     missing: List[str] = field(default_factory=list)  # 目标 VaM 缺的精选 morph 名
     renamed: Dict[str, str] = field(default_factory=dict)  # 别名解析:概念名→实际名
     basis: Dict[str, float] = field(default_factory=dict)  # 角色基底 {整头morph: 权重}
+    basis_missing: List[str] = field(default_factory=list)  # 列表里有但 set 被拒的基底候选
 
 
 # ---------------------------------------------------------------------------
@@ -333,23 +334,28 @@ def character_head_candidates(rows: List[Dict[str, Any]]) -> List[str]:
 
 def basis_search(evaluate, bridge, atom: str, candidates: List[str],
                  baseline: float, weights: Tuple[float, ...] = (1.0, 0.6),
-                 budget: int = 60) -> Tuple[Dict[str, float], int, List[float]]:
+                 budget: int = 60, topk: int = 3
+                 ) -> Tuple[Dict[str, float], int, List[float], List[str]]:
     """扫描候选整头 morph,找最像目标的当拟合起点。
 
-    每个候选打 weights[0] 评估一次(顺手清掉上一个候选);冠军再试
-    其余权重微调。谁都赢不过 baseline(不加基底的脸)就全部归零、
-    空手而归 —— 基底只能帮忙,不能帮倒忙。
+    每个候选打 weights[0] 评估一次(顺手清掉上一个候选);**前 topk 名**
+    再各试其余权重 —— 截图有噪声,单次评估的 argmax 容易选错人,给前几名
+    复赛机会。谁都赢不过 baseline(不加基底的脸)就全部归零、空手而归。
 
-    返回 (basis {名字: 权重} 或 {}, 用掉的评估数, 分数序列)。
+    真机怪相防御:个别 morph 列表里有但 set 被拒(回执 missing)——那次
+    评估拍的是没变化的脸,分数是 baseline 的伪装,候选当场作废,进
+    invalid 名单带回去(修插件的线索)。
+
+    返回 (basis {名字: 权重} 或 {}, 用掉的评估数, 分数序列, invalid 名单)。
     结束时场景状态 = 采纳的结果(其余候选已归零),缓存 epoch 已 bump。
     """
     history: List[float] = []
     used = 0
-    best_name: Optional[str] = None
-    best_w = 0.0
-    best_score = baseline
     prev: Optional[str] = None
     touched: set = set()
+    scores: Dict[str, float] = {}
+    invalid: List[str] = []
+    seen_missing = set(getattr(evaluate, "missing", set()))
 
     for c in candidates:
         if used >= budget:
@@ -361,23 +367,35 @@ def basis_search(evaluate, bridge, atom: str, candidates: List[str],
         used += 1
         history.append(s)
         touched.add(c)
-        if s > best_score:
-            best_name, best_w, best_score = c, weights[0], s
+        now_missing = set(getattr(evaluate, "missing", set()))
+        if c in now_missing - seen_missing:
+            invalid.append(c)
+            seen_missing = now_missing
+        else:
+            scores[c] = s
         prev = c
 
-    if best_name is not None:
-        for w in weights[1:]:
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:max(1, topk)]
+    best_name: Optional[str] = None
+    best_w = 0.0
+    best_score = baseline
+    for name, s in ranked:
+        if s > best_score:
+            best_name, best_w, best_score = name, weights[0], s
+
+    for w in weights[1:]:
+        for name, _ in ranked:
             if used >= budget:
                 break
-            vals = {best_name: w}
-            if prev is not None and prev != best_name:
+            vals = {name: w}
+            if prev is not None and prev != name:
                 vals[prev] = 0.0
             s = evaluate(vals)
             used += 1
             history.append(s)
             if s > best_score:
-                best_w, best_score = w, s
-            prev = best_name
+                best_name, best_w, best_score = name, w, s
+            prev = name
 
     # 落定:所有摸过的候选归零,采纳的基底(若有)设回最优权重
     settle = {c: 0.0 for c in touched}
@@ -388,7 +406,7 @@ def basis_search(evaluate, bridge, atom: str, candidates: List[str],
     if settle:
         bridge.set_morphs(atom, settle, clamp=True)
         evaluate.bump_epoch()  # 绕过 evaluate 写了状态,旧缓存作废
-    return basis, used, history
+    return basis, used, history, invalid
 
 
 def _stage_name_lists(cfg: FitConfig, stages: List[List[str]],
@@ -543,6 +561,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     # ---- 角色基底粗定位(v0.6):先跨大距离,再精修 --------------------------
     # 采纳基底后,下面的先验探针会在基底之上重测残差,种子据此重算。
     basis: Dict[str, float] = {}
+    basis_missing: List[str] = []
     if use_basis and budget > 3:
         cand = (list(basis_candidates) if basis_candidates is not None
                 else character_head_candidates(rows))
@@ -551,9 +570,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             baseline = evaluate(base_vals)
             history_all.append(baseline)
             budget -= 1
-            bb = min(len(cand) + 1, max(0, budget - 8))  # 至少给精修留 8 次
-            basis, used, bh = basis_search(evaluate, bridge, cfg.atom, cand,
-                                           baseline, budget=bb)
+            bb = min(len(cand) + 3, max(0, budget - 8))  # 至少给精修留 8 次
+            basis, used, bh, basis_missing = basis_search(
+                evaluate, bridge, cfg.atom, cand, baseline, budget=bb)
             history_all.extend(bh)
             budget -= used
             if basis:
@@ -616,8 +635,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        prior_seed=prior_seed, neutralized=neutralized,
                        stage_count=len(stage_names),
                        cache_hits=evaluate.cache_hits,
-                       missing=sorted(evaluate.missing),
-                       renamed=renamed, basis=basis)
+                       missing=sorted(set(evaluate.missing) - set(basis_missing)),
+                       renamed=renamed, basis=basis,
+                       basis_missing=sorted(basis_missing))
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

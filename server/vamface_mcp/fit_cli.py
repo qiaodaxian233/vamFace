@@ -131,6 +131,9 @@ def main(argv=None) -> int:
         if "NullScorer" in result.warning:
             print("         (score above is a placeholder; install extras: "
                   "pip install -e '.[fit]')", file=sys.stderr)
+    if result.basis_missing:
+        print(f"  基底废票(列表里有但设不进去,插件侧线索): "
+              f"{', '.join(result.basis_missing)}")
     if result.basis:
         print(f"  基底: {json.dumps(result.basis, ensure_ascii=False)}(已含在 .vap)")
     if result.renamed:

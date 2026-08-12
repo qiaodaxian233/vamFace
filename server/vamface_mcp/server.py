@@ -260,6 +260,8 @@ def vam_fit_face(target_image: str, atom: str = "Person",
             out["hints"] = result.hints
         if result.basis:
             out["basis"] = result.basis
+        if result.basis_missing:
+            out["basis_missing"] = result.basis_missing
         if result.renamed:
             out["renamed"] = result.renamed
         if result.missing:

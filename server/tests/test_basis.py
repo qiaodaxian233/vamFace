@@ -73,10 +73,11 @@ def test_basis_search_picks_winner_and_zeroes_losers():
     ev = _StateEval({("A", 1.0): 0.3, ("B", 1.0): 0.8, ("B", 0.6): 0.6,
                      ("C", 1.0): 0.4})
     bridge = _RecordingBridge()
-    basis, used, hist = basis_search(ev, bridge, "Person", ["A", "B", "C"],
-                                     baseline=0.2)
+    basis, used, hist, invalid = basis_search(ev, bridge, "Person",
+                                              ["A", "B", "C"], baseline=0.2)
     assert basis == {"B": 1.0}          # 冠军 @ 最优权重(0.6 没赢过 1.0)
-    assert used == 4                     # 3 候选 + 1 次权重微调
+    assert used == 6                     # 3 候选 + top3 各 1 次复赛
+    assert invalid == []
     assert bridge.settled["A"] == 0.0 and bridge.settled["C"] == 0.0
     assert bridge.settled["B"] == 1.0
     assert ev.epoch_bumps == 1           # 落定绕过 evaluate,必须作废缓存
@@ -85,16 +86,60 @@ def test_basis_search_picks_winner_and_zeroes_losers():
 def test_basis_search_weight_refinement_wins():
     ev = _StateEval({("A", 1.0): 0.5, ("A", 0.6): 0.9})
     bridge = _RecordingBridge()
-    basis, used, _ = basis_search(ev, bridge, "Person", ["A"], baseline=0.2)
+    basis, used, _, _ = basis_search(ev, bridge, "Person", ["A"], baseline=0.2)
     assert basis == {"A": 0.6}
     assert bridge.settled["A"] == 0.6
+
+
+def test_basis_search_topk_rescues_noisy_runnerup():
+    """首轮亚军在复赛权重上反超 —— top-k 复赛就是为噪声 argmax 兜底的。"""
+    ev = _StateEval({("A", 1.0): 0.50, ("B", 1.0): 0.45, ("C", 1.0): 0.10,
+                     ("A", 0.6): 0.40, ("B", 0.6): 0.80, ("C", 0.6): 0.10})
+    bridge = _RecordingBridge()
+    basis, used, _, _ = basis_search(ev, bridge, "Person", ["A", "B", "C"],
+                                     baseline=0.2)
+    assert basis == {"B": 0.6}
+    assert bridge.settled["B"] == 0.6 and bridge.settled["A"] == 0.0
+
+
+def test_basis_search_invalidates_unsettable_candidate():
+    """真机怪相:morph 列表里有但 set 被拒(Izarra/Lilith 6 Head 实锤)——
+    那次评估拍到的是没变化的脸,分数是假的,候选必须作废。"""
+
+    class _GhostEval(_StateEval):
+        """'Ghost' 写不进去:状态不更新 + 记 missing;全零脸给假高分。"""
+
+        def __init__(self, scores, ghost):
+            super().__init__(scores)
+            self.ghost = ghost
+            self.missing = set()
+
+        def __call__(self, vals):
+            applied = dict(vals)
+            if applied.pop(self.ghost, 0.0):
+                self.missing.add(self.ghost)
+            self.state.update(applied)
+            active = [(n, v) for n, v in sorted(self.state.items())
+                      if abs(v) > 1e-9]
+            if not active:
+                return 0.99  # 没写进任何东西 = 拍到基线脸的假高分
+            if len(active) != 1:
+                return 0.05
+            return self.scores.get(active[0], 0.1)
+
+    ev = _GhostEval({("A", 1.0): 0.4, ("A", 0.6): 0.3}, ghost="Ghost")
+    bridge = _RecordingBridge()
+    basis, used, _, invalid = basis_search(ev, bridge, "Person",
+                                           ["Ghost", "A"], baseline=0.2)
+    assert invalid == ["Ghost"]
+    assert basis == {"A": 1.0}           # 假高分 0.99 没能让 Ghost 当选
 
 
 def test_basis_search_declines_when_nobody_beats_baseline():
     ev = _StateEval({("A", 1.0): 0.1, ("B", 1.0): 0.15})
     bridge = _RecordingBridge()
-    basis, used, _ = basis_search(ev, bridge, "Person", ["A", "B"],
-                                  baseline=0.5)
+    basis, used, _, _ = basis_search(ev, bridge, "Person", ["A", "B"],
+                                     baseline=0.5)
     assert basis == {}                             # 基底只能帮忙不能帮倒忙
     assert set(bridge.settled.items()) == {("A", 0.0), ("B", 0.0)}
 
@@ -102,9 +147,9 @@ def test_basis_search_declines_when_nobody_beats_baseline():
 def test_basis_search_respects_budget():
     ev = _StateEval({(f"C{i}", 1.0): 0.3 for i in range(10)})
     bridge = _RecordingBridge()
-    _, used, _ = basis_search(ev, bridge, "Person",
-                              [f"C{i}" for i in range(10)],
-                              baseline=0.0, budget=4)
+    _, used, _, _ = basis_search(ev, bridge, "Person",
+                                 [f"C{i}" for i in range(10)],
+                                 baseline=0.0, budget=4)
     assert used <= 4
 
 

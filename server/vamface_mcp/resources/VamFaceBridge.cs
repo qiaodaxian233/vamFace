@@ -40,7 +40,7 @@ namespace VamFace
 {
     public class VamFaceBridge : MVRScript
     {
-        private const string VERSION = "0.6.1";
+        private const string VERSION = "0.6.2";
         // 与 server 端 vamface_mcp.PROTOCOL_VERSION 对账,改协议时两边同步 +1。
         private const int PROTOCOL = 1;
         private const int DEFAULT_PORT = 8787;
@@ -409,6 +409,26 @@ namespace VamFace
         {
             DAZMorph m = ui.GetMorphByDisplayName(name);
             if (m == null) m = ui.GetMorphByUid(name); // TODO(verify) method name
+            if (m == null)
+            {
+                // v0.6.2 真机实锤:个别 morph(displayName ≠ uid 的条目,如
+                // "Izarra"/"Lilith 6 Head")GetMorphs() 枚举得到、但两个字典
+                // 都查不到。退线性扫 —— list_morphs 给得出的名字,set_morphs
+                // 必须设得进去,枚举源和查找源从构造上对齐。只在字典 miss 时
+                // 走这条路,不影响正常性能。
+                List<DAZMorph> all = ui.GetMorphs();
+                if (all != null)
+                {
+                    string trimmed = name.Trim();
+                    for (int i = 0; i < all.Count; i++)
+                    {
+                        DAZMorph cand = all[i];
+                        if (cand == null) continue;
+                        string dn = cand.displayName != null ? cand.displayName.Trim() : "";
+                        if (dn == trimmed || cand.uid == name) { m = cand; break; }
+                    }
+                }
+            }
             return m;
         }
 
@@ -832,6 +852,19 @@ namespace VamFace
             return best;
         }
 
+        // 剥掉所有名字带 "ui" 的层(VaM 的 UI 不一定在 Unity 标准 "UI" 层上;
+        // 真机第五跑截图又混进了底部工具栏)。LayerToName 对空层返回 "",安全。
+        private static int StripUiLayers(int mask)
+        {
+            for (int i = 0; i < 32; i++)
+            {
+                string n = LayerMask.LayerToName(i);
+                if (!string.IsNullOrEmpty(n) && n.ToLowerInvariant().Contains("ui"))
+                    mask &= ~(1 << i);
+            }
+            return mask;
+        }
+
         private byte[] CaptureFromCamera(Camera cam, int maxWidth,
                                          out int outW, out int outH)
         {
@@ -849,7 +882,7 @@ namespace VamFace
             try
             {
                 cam.targetTexture = rt;
-                cam.cullingMask = prevMask & ~LayerMask.GetMask("UI");
+                cam.cullingMask = StripUiLayers(prevMask);
                 cam.Render();
                 RenderTexture.active = rt;
                 Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, false);

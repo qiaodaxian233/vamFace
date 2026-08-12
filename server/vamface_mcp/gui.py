@@ -160,6 +160,9 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, iters, g
         status += f"\n⚠️ {result.warning}"
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.basis_missing:
+        status += (f"\n⚠️ {len(result.basis_missing)} 个基底候选列表里有但设不进去"
+                   f"(已跳过,插件侧线索): {', '.join(result.basis_missing)}")
     if result.basis:
         b = ", ".join(f"{k} = {v:g}" for k, v in result.basis.items())
         status += f"\n🧬 基底: {b}(已含在 .vap 里)"
@@ -379,7 +382,11 @@ def tune_shot(host, port, atom):
         except BridgeError:
             pass  # 聚焦失败不挡截图
         shot = b.screenshot(max_width=640)
-        return decode_png_b64(shot["png_base64"]), "✅ 已刷新"
+        method = shot.get("method", "screen(旧插件)")
+        note = ("" if method == "camera"
+                else " ⚠️ 走的是整屏捕获,UI 会混进打分图——插件不是 0.5.5+"
+                     " 或相机发现失败")
+        return decode_png_b64(shot["png_base64"]), f"✅ 已刷新 · 捕获方式: {method}{note}"
     except BridgeError as e:
         return None, f"❌ {e}"
 
