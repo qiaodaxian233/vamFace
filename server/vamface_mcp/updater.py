@@ -23,7 +23,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
 
@@ -218,6 +218,58 @@ def _overlay_zip(zip_bytes: bytes, root: Path) -> Dict[str, Any]:
     return {"ok": True, "files_written": written}
 
 
+# ---------------------------------------------------------------------------
+# v0.6.1:git 快路自愈 —— 解开 "zip 覆盖过一次就永远走 zip" 的自锁
+# ---------------------------------------------------------------------------
+# zip 覆盖会在 git 检出的工作区里留下**未跟踪**的同名文件;之后每次
+# `git pull --ff-only` 都报 "untracked working tree files would be
+# overwritten by merge" 被挡,降级 zip,残留更多 —— 死循环。
+# 解法:识别这个特定报错,把被点名的文件(只限覆盖前缀内的)挪去
+# .pre-update.bak,重试一次 pull。反正 zip 降级也会用远端内容盖掉它们,
+# 挪走并不比现状更有破坏性;前缀外的文件是用户自己的,一根手指都不碰。
+
+def _untracked_blockers(git_output: str) -> List[str]:
+    """从 git 报错里解析被点名的未跟踪文件;不是这类报错返回 []。"""
+    if "untracked working tree files" not in git_output:
+        return []
+    out: List[str] = []
+    collecting = False
+    for line in git_output.splitlines():
+        if "untracked working tree files" in line:
+            collecting = True
+            continue
+        if collecting:
+            if line[:1] in ("\t", " ") and line.strip():
+                out.append(line.strip())
+            elif out:
+                break
+    return out
+
+
+def _is_managed_path(rel: str) -> bool:
+    rel = rel.replace("\\", "/").lstrip("/")
+    if ".." in rel.split("/"):
+        return False
+    return rel.startswith(_OVERLAY_PREFIXES)
+
+
+def _sidestep_blockers(root: Path, blockers: List[str]) -> List[str]:
+    """把挡路文件挪去 <名字>.pre-update.bak。挪不动的跳过(重试失败自会降级)。"""
+    moved: List[str] = []
+    for rel in blockers:
+        p = root / rel.replace("\\", "/")
+        try:
+            if p.is_file():
+                bak = p.with_name(p.name + ".pre-update.bak")
+                if bak.exists():
+                    bak.unlink()
+                p.replace(bak)
+                moved.append(rel)
+        except OSError:
+            pass
+    return moved
+
+
 def update_server(fetch_bytes: Optional[Callable[[str], bytes]] = None,
                   runner: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
     """把 server 代码更到 GitHub main。永不抛异常。
@@ -244,13 +296,23 @@ def update_server(fetch_bytes: Optional[Callable[[str], bytes]] = None,
                          capture_output=True, text=True, timeout=15).stdout.strip()
             r = run(["git", "pull", "--ff-only"], cwd=str(root),
                     capture_output=True, text=True, timeout=120)
+            heal_note = ""
+            if r.returncode != 0:
+                blockers = _untracked_blockers(r.stderr or r.stdout or "")
+                if blockers and all(_is_managed_path(b) for b in blockers):
+                    moved = _sidestep_blockers(root, blockers)
+                    if moved:
+                        r = run(["git", "pull", "--ff-only"], cwd=str(root),
+                                capture_output=True, text=True, timeout=120)
+                        heal_note = (f"(清障 {len(moved)} 个 zip 覆盖残留,"
+                                     f"原件在同名 .pre-update.bak)")
             if r.returncode == 0:
                 after = run(["git", "rev-parse", "--short", "HEAD"], cwd=str(root),
                             capture_output=True, text=True, timeout=15).stdout.strip()
                 changed = before != after
                 return {"ok": True, "method": "git",
                         "detail": (f"{before} → {after}" if changed
-                                   else f"已是最新({after})"),
+                                   else f"已是最新({after})") + heal_note,
                         "restart_required": changed, "error": None}
             git_err = (r.stderr or r.stdout or "").strip()[-300:]
         except Exception as e:  # noqa: BLE001 — 更新失败要降级不要炸
