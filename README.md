@@ -10,6 +10,9 @@ in-game morph sliders until the rendered face matches.
 > 59 tests, CI on 3.10/3.12). What still needs a live VaM 1.22 pass is only
 > the plugin-side API names marked `TODO(verify)` — see `docs/protocol.md`.
 
+> 🤖 本项目由仓库主人与 AI 结对持续开发。跨对话接续协议与项目状态见
+> **[《对话记忆.md》](对话记忆.md)** —— 新对话把仓库地址发给 AI 即可无缝续接。
+
 ## How it works
 
 ```
