@@ -36,7 +36,7 @@ import base64
 import io
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -114,6 +114,7 @@ class FitResult:
     cache_hits: int = 0                  # 截图缓存命中次数(省下的真机来回)
     missing: List[str] = field(default_factory=list)  # 目标 VaM 缺的精选 morph 名
     renamed: Dict[str, str] = field(default_factory=dict)  # 别名解析:概念名→实际名
+    basis: Dict[str, float] = field(default_factory=dict)  # 角色基底 {整头morph: 权重}
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +296,101 @@ DEFAULT_STAGES: List[List[str]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# 角色基底粗定位(v0.6)
+# ---------------------------------------------------------------------------
+# 精选 morph 是**增量**滑块:从默认脸出发,几百次评估爬不到脸型差异大的
+# 目标(实测:默认 G2 脸 → 东亚脸,0.2x 分封顶)。但用户装的 morph 包里
+# 通常有一堆"整头角色" morph(Aiko 6 Head、Sumiko Head……),每个都是
+# 一张完整的脸 —— 先扫一遍找最像的当起点,再用精选 morph 精修,等于
+# 白捡一个 route A 的低配版:基底负责跨过大距离,增量滑块负责收尾。
+
+# 名字里带这些词的 Head 区 morph 是特征滑块,不是整头角色
+_CHARACTER_HEAD_EXCLUDE = (
+    "scale", "width", "length", "height", "size", "define", "round",
+    "flat", "slope", "wrinkle", "puffy", "neck", "smooth", "shape",
+)
+
+
+def character_head_candidates(rows: List[Dict[str, Any]]) -> List[str]:
+    """从 list_morphs 行里挑'整头角色' morph:region==Head 且名字无特征词。
+
+    启发式(按仓库主人真机清单调过):Head 区 51 个里能留下 42 个角色头,
+    误杀为零。别的机器上宁可漏挑(候选少)也别错挑(把 Head Scale 当
+    角色头扫会毁掉基线状态)。
+    """
+    out: List[str] = []
+    for r in rows:
+        if str(r.get("region", "")).strip().lower() != "head":
+            continue
+        name = str(r.get("name", "")).strip()
+        low = name.lower()
+        if not name or any(w in low for w in _CHARACTER_HEAD_EXCLUDE):
+            continue
+        out.append(name)
+    return out
+
+
+def basis_search(evaluate, bridge, atom: str, candidates: List[str],
+                 baseline: float, weights: Tuple[float, ...] = (1.0, 0.6),
+                 budget: int = 60) -> Tuple[Dict[str, float], int, List[float]]:
+    """扫描候选整头 morph,找最像目标的当拟合起点。
+
+    每个候选打 weights[0] 评估一次(顺手清掉上一个候选);冠军再试
+    其余权重微调。谁都赢不过 baseline(不加基底的脸)就全部归零、
+    空手而归 —— 基底只能帮忙,不能帮倒忙。
+
+    返回 (basis {名字: 权重} 或 {}, 用掉的评估数, 分数序列)。
+    结束时场景状态 = 采纳的结果(其余候选已归零),缓存 epoch 已 bump。
+    """
+    history: List[float] = []
+    used = 0
+    best_name: Optional[str] = None
+    best_w = 0.0
+    best_score = baseline
+    prev: Optional[str] = None
+    touched: set = set()
+
+    for c in candidates:
+        if used >= budget:
+            break
+        vals: Dict[str, float] = {c: weights[0]}
+        if prev is not None:
+            vals[prev] = 0.0
+        s = evaluate(vals)
+        used += 1
+        history.append(s)
+        touched.add(c)
+        if s > best_score:
+            best_name, best_w, best_score = c, weights[0], s
+        prev = c
+
+    if best_name is not None:
+        for w in weights[1:]:
+            if used >= budget:
+                break
+            vals = {best_name: w}
+            if prev is not None and prev != best_name:
+                vals[prev] = 0.0
+            s = evaluate(vals)
+            used += 1
+            history.append(s)
+            if s > best_score:
+                best_w, best_score = w, s
+            prev = best_name
+
+    # 落定:所有摸过的候选归零,采纳的基底(若有)设回最优权重
+    settle = {c: 0.0 for c in touched}
+    basis: Dict[str, float] = {}
+    if best_name is not None:
+        basis = {best_name: best_w}
+        settle[best_name] = best_w
+    if settle:
+        bridge.set_morphs(atom, settle, clamp=True)
+        evaluate.bump_epoch()  # 绕过 evaluate 写了状态,旧缓存作废
+    return basis, used, history
+
+
 def _stage_name_lists(cfg: FitConfig, stages: List[List[str]],
                       rename: Optional[Dict[str, str]] = None) -> List[List[str]]:
     """分组名 → morph 名列表,并与 cfg.morph_names 求交(尊重用户的 groups 选择)。
@@ -334,7 +430,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
              scorer: Optional[Scorer] = None,
              use_prior: bool = True, neutralize: bool = True,
              coarse_to_fine: bool = False,
-             stages: Optional[List[List[str]]] = None) -> FitResult:
+             stages: Optional[List[List[str]]] = None,
+             use_basis: bool = False,
+             basis_candidates: Optional[List[str]] = None) -> FitResult:
     """v0.4 拟合入口:表情归一化 → 先验探针 → (分阶段)黑盒优化 → 提示。
 
     style: auto | real | anime | pixel(见 scorers.build_scorer_stack)
@@ -345,6 +443,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     neutralize: 拟合前清零表情类 morph(失败只警告,不阻塞)
     coarse_to_fine: 按 DEFAULT_STAGES 两阶段(轮廓→五官),预算按维数分摊
     stages: 自定义阶段(分组名列表的列表),给了则覆盖 coarse_to_fine
+    use_basis: v0.6 角色基底粗定位 —— 先扫整头角色 morph 找最像的当起点,
+               再精修(候选默认从 list_morphs 的 Head 区自动挑,也可用
+               basis_candidates 显式给)。每个候选吃一次评估,计入预算。
     """
     from .priors import order_by_prior, seed_from_diff
 
@@ -363,6 +464,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     # 硬试(missing 仍由 set_morphs 回执兜底收集)—— 猜测值不当阻塞器。
     canonical_names = list(cfg.morph_names)
     resolution = None
+    rows: List[Dict[str, Any]] = []
     real_bounds: Dict[str, Tuple[float, float]] = {}
     try:
         reply = bridge.list_morphs(cfg.atom, limit=1_000_000)
@@ -437,6 +539,29 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     history_all: List[float] = []
     budget = cfg.max_iters
     geo = find_geometry_scorer(scorer) if use_prior else None
+
+    # ---- 角色基底粗定位(v0.6):先跨大距离,再精修 --------------------------
+    # 采纳基底后,下面的先验探针会在基底之上重测残差,种子据此重算。
+    basis: Dict[str, float] = {}
+    if use_basis and budget > 3:
+        cand = (list(basis_candidates) if basis_candidates is not None
+                else character_head_candidates(rows))
+        if cand:
+            base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+            baseline = evaluate(base_vals)
+            history_all.append(baseline)
+            budget -= 1
+            bb = min(len(cand) + 1, max(0, budget - 8))  # 至少给精修留 8 次
+            basis, used, bh = basis_search(evaluate, bridge, cfg.atom, cand,
+                                           baseline, budget=bb)
+            history_all.extend(bh)
+            budget -= used
+            if basis:
+                log.info("basis 采纳: %s(扫描 %d 个候选,用 %d 次评估)",
+                         basis, len(cand), used)
+        else:
+            log.info("basis 扫描跳过:没找到整头角色 morph 候选")
+
     if geo is not None and budget > 1:
         base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
         history_all.append(evaluate(base_vals))
@@ -453,7 +578,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                    else [list(cfg.morph_names)])
     total_dims = sum(len(ns) for ns in stage_names) or 1
 
-    best_morphs: Dict[str, float] = {}
+    best_morphs: Dict[str, float] = dict(basis)  # 基底进 .vap,不然预设丢脸型
     best_score = -1e9
     for i, names in enumerate(stage_names):
         stage_budget = max(8, int(round(budget * len(names) / total_dims))) \
@@ -492,7 +617,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        stage_count=len(stage_names),
                        cache_hits=evaluate.cache_hits,
                        missing=sorted(evaluate.missing),
-                       renamed=renamed)
+                       renamed=renamed, basis=basis)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

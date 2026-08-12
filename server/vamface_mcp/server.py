@@ -192,7 +192,8 @@ def vam_fit_face(target_image: str, atom: str = "Person",
                  save_vap: bool = True, style: str = "auto",
                  anime_onnx: Optional[str] = None,
                  use_prior: bool = True, neutralize: bool = True,
-                 coarse_to_fine: bool = False) -> Dict[str, Any]:
+                 coarse_to_fine: bool = False,
+                 use_basis: bool = False) -> Dict[str, Any]:
     """Automatically fit the VaM face to a target photo.
 
     Runs a black-box optimization loop: set morphs -> screenshot ->
@@ -218,6 +219,9 @@ def vam_fit_face(target_image: str, atom: str = "Person",
              can't cheat identity similarity with a smile.
       coarse_to_fine: two-stage fit — contour groups (skull/jaw/cheeks)
              first, frozen, then features (eyes/nose/mouth/ears).
+      use_basis: scan installed full-head character morphs first and adopt
+             the closest one as the starting point (v0.6; one evaluation
+             per candidate, drawn from the same budget).
 
     NOTE: if no identity scorer is installed (insightface), the score is a
     placeholder 0.0 and `warning` will say so — the loop still runs but the
@@ -241,7 +245,7 @@ def vam_fit_face(target_image: str, atom: str = "Person",
         result = fit_face(_bridge, target_image, cfg, optimizer=optimizer,
                           style=style, anime_onnx=anime_onnx,
                           use_prior=use_prior, neutralize=neutralize,
-                          coarse_to_fine=coarse_to_fine)
+                          coarse_to_fine=coarse_to_fine, use_basis=use_basis)
 
         out: Dict[str, Any] = {
             "ok": True,
@@ -254,6 +258,12 @@ def vam_fit_face(target_image: str, atom: str = "Person",
         }
         if result.hints:
             out["hints"] = result.hints
+        if result.basis:
+            out["basis"] = result.basis
+        if result.renamed:
+            out["renamed"] = result.renamed
+        if result.missing:
+            out["missing"] = result.missing
         if result.neutralized:
             out["neutralized_expressions"] = result.neutralized
         if result.prior_seed:

@@ -63,6 +63,8 @@ def main(argv=None) -> int:
     parser.add_argument("--no-cache", action="store_true",
                         help="禁用截图缓存(默认开: 重访相同 morph 向量直接复用分数)")
     parser.add_argument("--iters", type=int, default=60, help="evaluation budget")
+    parser.add_argument("--basis", action="store_true",
+                        help="先扫整头角色 morph 当起点(v0.6 基底粗定位)")
     parser.add_argument("--groups", nargs="*", choices=sorted(FACE_MORPH_GROUPS),
                         help="morph regions to optimize (default: all)")
     parser.add_argument("--out", help="output .vap path (default: fit_<ts>.vap)")
@@ -105,6 +107,7 @@ def main(argv=None) -> int:
     t0 = time.time()
     try:
         result = fit_face(bridge, str(photo), cfg, optimizer=args.optimizer,
+                          use_basis=args.basis,
                           style=args.style, anime_onnx=args.anime_onnx,
                           use_prior=not args.no_prior,
                           neutralize=not args.no_neutralize,
@@ -128,6 +131,8 @@ def main(argv=None) -> int:
         if "NullScorer" in result.warning:
             print("         (score above is a placeholder; install extras: "
                   "pip install -e '.[fit]')", file=sys.stderr)
+    if result.basis:
+        print(f"  基底: {json.dumps(result.basis, ensure_ascii=False)}(已含在 .vap)")
     if result.renamed:
         pairs = ", ".join(f"{k}→{v}" for k, v in sorted(result.renamed.items()))
         print(f"  别名解析生效 {len(result.renamed)} 个(概念名→实际名): {pairs}")

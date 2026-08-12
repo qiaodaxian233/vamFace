@@ -90,7 +90,7 @@ def _score_plot(history: List[float]):
 # Tab 1: 照片拟合
 # ---------------------------------------------------------------------------
 
-def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, width):
+def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, iters, groups, width):
     """Generator: streams live progress to the UI while fitting runs."""
     if not photo_path:
         yield None, None, "请先上传目标照片", None, None
@@ -123,7 +123,8 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
         try:
             state["result"] = fit_face(bridge, photo_path, cfg,
                                        optimizer=optimizer, style=style,
-                                       coarse_to_fine=bool(c2f))
+                                       coarse_to_fine=bool(c2f),
+                                       use_basis=bool(basis))
         except Exception as e:  # BridgeError or optimizer failure
             state["error"] = str(e)
         finally:
@@ -159,6 +160,9 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
         status += f"\n⚠️ {result.warning}"
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.basis:
+        b = ", ".join(f"{k} = {v:g}" for k, v in result.basis.items())
+        status += f"\n🧬 基底: {b}(已含在 .vap 里)"
     if result.renamed:
         pairs = ", ".join(f"{k}→{v}" for k, v in sorted(result.renamed.items()))
         status += (f"\n🔁 别名解析生效 {len(result.renamed)} 个"
@@ -455,6 +459,9 @@ def build_app():
                 style = gr.Radio(["auto", "real", "anime", "pixel"], value="auto",
                                  label="打分风格(anime 素材务必选 anime/auto)", scale=2)
                 c2f = gr.Checkbox(value=True, label="粗→细两阶段(先轮廓后五官)", scale=1)
+                basis = gr.Checkbox(value=True, scale=2,
+                                    label="角色基底粗定位(先扫整头角色 morph 当起点,"
+                                          "每个候选吃 1 次评估)")
                 iters = gr.Slider(10, 400, value=60, step=10, label="评估预算", scale=2)
                 width = gr.Slider(256, 1024, value=512, step=64, label="截图宽度", scale=1)
             groups = gr.CheckboxGroup(sorted(FACE_MORPH_GROUPS),
@@ -464,7 +471,7 @@ def build_app():
             fit_status = gr.Markdown("")
             fit_plot = gr.Plot(label="分数曲线")
             fit_vap = gr.File(label="导出的 .vap 预设")
-            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, c2f, iters, groups, width],
+            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, c2f, basis, iters, groups, width],
                           [photo, current, fit_status, fit_plot, fit_vap])
 
         with gr.Tab("手动微调"):
