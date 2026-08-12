@@ -17,6 +17,18 @@
 
 from __future__ import annotations
 
+# --- direct-run bootstrap -------------------------------------------------
+# 包内模块被当成裸文件跑(Windows 上双击 / 直接敲文件路径)时,相对导入会炸
+# "attempted relative import with no known parent package"。检测到这种情况就
+# 把包父目录塞进 sys.path,以正确的模块身份重跑一遍。用户实测踩过(2026-08-12)。
+if __package__ in (None, ""):
+    import os as _os, sys as _sys, runpy as _runpy
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    _runpy.run_module("vamface_mcp.gui", run_name="__main__")
+    _sys.exit(0)
+# ---------------------------------------------------------------------------
+
+
 import json
 import threading
 import time
