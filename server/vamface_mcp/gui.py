@@ -163,6 +163,9 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, jac, ite
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
     if result.health:
         status = result.health + "\n" + status  # 健康度警告置顶,别让人白跑
+    if result.saturated:
+        status += (f"\n⛔ 顶到滑块边界: {', '.join(result.saturated)}"
+                   f" —— 对应残差已无法再压,是这套 morph 包的物理极限")
     if result.jacobian_note:
         status += f"\n📐 本地校准模型: {result.jacobian_note}"
     if result.basis_missing:

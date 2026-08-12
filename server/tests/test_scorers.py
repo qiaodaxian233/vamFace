@@ -203,13 +203,13 @@ def test_backend_report_states(monkeypatch):
     fake.get_available_providers = lambda: ["DmlExecutionProvider",
                                             "CPUExecutionProvider"]
     monkeypatch.setitem(sys.modules, "onnxruntime", fake)
-    r = scorers.backend_report()
+    r = scorers.backend_report(deep=False)
     assert "✅" in r and "DirectML" in r
 
     fake.get_available_providers = lambda: ["CPUExecutionProvider"]
-    r = scorers.backend_report()
+    r = scorers.backend_report(deep=False)
     assert "⚠️" in r and "force-reinstall" in r
 
     monkeypatch.setitem(sys.modules, "onnxruntime", None)
-    r = scorers.backend_report()
+    r = scorers.backend_report(deep=False)
     assert "❌" in r and "残骸" in r

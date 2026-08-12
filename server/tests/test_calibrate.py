@@ -294,3 +294,66 @@ def test_basis_baseline_clears_leftover_state(tmp_path):
     # 残留被清零后重新公平选拔,TestFace 仍然当选(它确实最像)
     assert res.basis == {"TestFace": 1.0}
     assert res.best_score >= 0.99
+
+
+def test_final_gn_polish_recovers_after_cma_drift(tmp_path, monkeypatch):
+    """CMA 末段漂走的几何残差,收尾 GN 要能压回去(分数不劣于 CMA 结果)。"""
+    monkeypatch.setattr(calibrate, "CACHE_DIR", tmp_path / "cache")
+    bridge = _MockFitBridge()
+    cfg = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                    max_iters=40, use_cache=False, screenshot_width=512)
+    res = fit_face(bridge, _target_png(tmp_path), cfg, optimizer="greedy",
+                   scorer=GeometryScorer(features_from_mock),
+                   use_prior=False, neutralize=False, use_jacobian=True)
+    assert res.best_score > 0.9
+    assert "43" not in res.jacobian_note  # sanity: mock 只有 4 个滑块
+
+
+def test_saturated_sliders_reported(tmp_path):
+    """滑块顶到边界要点名 —— 连续几跑同一残差压不掉,用户该知道是物理极限。"""
+    from PIL import Image
+    from tests.test_resolution import _FlatScorer
+
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (127, 127, 127)).save(tpath)
+
+    class _B:
+        def list_morphs(self, atom, filter="", region="", limit=200):
+            rows = [{"name": "Nose Size", "uid": "x", "region": "nose",
+                     "value": 0, "min": 0, "max": 0.3}]
+            return {"count": 1, "total": 1, "morphs": rows}
+
+        def set_morphs(self, atom, values, clamp=True):
+            return {"ok": True, "applied": len(values), "missing": []}
+
+        def screenshot(self, max_width=512):
+            import base64, io
+            buf = io.BytesIO()
+            Image.new("RGB", (8, 8), (127, 127, 127)).save(buf, format="PNG")
+            return {"png_base64": base64.b64encode(buf.getvalue()).decode()}
+
+    class _WantMore(_FlatScorer):
+        """分数 = 值本身:优化器必然把 Nose Size 推到上界 0.3。"""
+
+        def __init__(self):
+            self.last = 0.0
+
+        def score(self, target, candidate):
+            return self.last
+
+    class _TrackBridge(_B):
+        def __init__(self, sc):
+            self.sc = sc
+
+        def set_morphs(self, atom, values, clamp=True):
+            if "Nose Size" in values:
+                self.sc.last = float(values["Nose Size"])
+            return super().set_morphs(atom, values, clamp)
+
+    sc = _WantMore()
+    bridge = _TrackBridge(sc)
+    cfg = FitConfig(atom="Person", morph_names=["Nose Size"],
+                    max_iters=12, use_cache=False)
+    res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+                   scorer=sc, use_prior=False, neutralize=False)
+    assert any(s.startswith("Nose Size=0.3") for s in res.saturated), res.saturated

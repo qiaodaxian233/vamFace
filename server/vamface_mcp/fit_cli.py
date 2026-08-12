@@ -135,6 +135,8 @@ def main(argv=None) -> int:
                   "pip install -e '.[fit]')", file=sys.stderr)
     if result.health:
         print(f"  {result.health}")
+    if result.saturated:
+        print(f"  顶到边界: {', '.join(result.saturated)}(残差已无法再压)")
     if result.jacobian_note:
         print(f"  本地校准模型: {result.jacobian_note}")
     if result.basis_missing:

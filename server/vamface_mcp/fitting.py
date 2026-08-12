@@ -118,6 +118,7 @@ class FitResult:
     basis_missing: List[str] = field(default_factory=list)  # 列表里有但 set 被拒的基底候选
     jacobian_note: str = ""              # 本地校准模型状态(新测/缓存/失败)
     health: str = ""                     # 检测健康度警告(空 = 正常)
+    saturated: List[str] = field(default_factory=list)  # 顶到边界的滑块(残差压不动的真因)
 
 
 # ---------------------------------------------------------------------------
@@ -621,13 +622,14 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     # ---- 本地校准模型(v0.7):量斜率 → 解方程,不瞎猜 -----------------------
     jacobian_note = ""
     pre_best: Optional[Tuple[Dict[str, float], float]] = None
+    J: Dict[str, Dict[str, float]] = {}
     geo_cal = find_geometry_scorer(scorer)  # 校准不和 use_prior 连坐
     if use_jacobian and geo_cal is not None and budget > 6:
         from .calibrate import (jacobian_polish, load_jacobian,
                                 probe_jacobian, save_jacobian)
         basis_tag = ",".join(f"{k}={v:g}" for k, v in sorted(basis.items()))
         J = load_jacobian(cfg.morph_names, cfg.screenshot_width,
-                          basis_tag) or {}
+                          basis_tag) or {}  # noqa: F841 —— 块外收尾还要用
         todo = [n for n in cfg.morph_names if n not in J]
         total = len(cfg.morph_names)
         if not todo:
@@ -707,6 +709,18 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             for k, v in _prior(geo.last_diff).items():
                 seed.setdefault(k, v)
 
+    # ---- 校准模型收尾(v0.7.5):CMA 之后再解两步方程 ----------------------
+    if len(J) >= 3 and geo_cal is not None and budget >= 2:
+        from .calibrate import jacobian_polish
+        bx, bs, used, ph = jacobian_polish(
+            evaluate, geo_cal, J, dict(best_morphs), cfg.morph_names,
+            lambda n: _bounds_for(cfg, n), iters=3, budget=budget)
+        history_all.extend(ph)
+        budget -= used
+        if bs > best_score:
+            best_morphs.update(bx)
+            best_score = bs
+
     health = ""
     geo_any = find_geometry_scorer(scorer)
     if geo_any is not None and getattr(geo_any, "target_undetected", False):
@@ -718,6 +732,15 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             health = (f"⚠️ {miss_ratio:.0%} 的评估检不出人脸,分数被噪声主导!"
                       f"灯光调中性白、拉亮拉平(现在的暗调/偏色打光是检测器"
                       f"杀手),正对脸、脸占画面 1/3 以上,再跑才有意义")
+
+    saturated: List[str] = []
+    for n in cfg.morph_names:
+        v = best_morphs.get(n)
+        if v is None or abs(v) < 1e-3:
+            continue
+        lo, hi = _bounds_for(cfg, n)
+        if v <= lo + 1e-3 or v >= hi - 1e-3:
+            saturated.append(f"{n}={v:g}")
 
     if pre_best is not None and pre_best[1] > best_score:
         best_morphs = dict(basis)
@@ -735,7 +758,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        missing=sorted(set(evaluate.missing) - set(basis_missing)),
                        renamed=renamed, basis=basis,
                        basis_missing=sorted(basis_missing),
-                       jacobian_note=jacobian_note, health=health)
+                       jacobian_note=jacobian_note, health=health,
+                       saturated=saturated)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

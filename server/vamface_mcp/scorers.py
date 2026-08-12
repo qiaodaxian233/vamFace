@@ -296,7 +296,7 @@ def _build_face_analysis(det: int = 512):
     return app, prov_name
 
 
-def backend_report() -> str:
+def backend_report(deep: bool = True) -> str:
     """打分后端一键自检:版本 + 可用 provider + 该修什么(GUI 调试页用)。"""
     try:
         import onnxruntime as ort
@@ -310,9 +310,22 @@ def backend_report() -> str:
     gpu = [p for p in provs if p != "CPUExecutionProvider"]
     if gpu:
         names = ", ".join(_PROVIDER_SHORT.get(p, p) for p in gpu)
-        return (f"✅ onnxruntime {ort.__version__} · GPU 后端可用: {names}\n"
-                f"下次拟合打分标签应显示 arcface@{_PROVIDER_SHORT.get(gpu[0], gpu[0])}"
-                f"(还是 @CPU 就把这里的输出贴给开发者)")
+        out = f"✅ onnxruntime {ort.__version__} · GPU 后端可用: {names}"
+        if deep:
+            # 真枪实弹装一遍模型,报 session 实际跑在哪(请求 ≠ 实际)
+            try:
+                import insightface
+                _, prov = _build_face_analysis()
+                out += (f"\n实测:insightface "
+                        f"{getattr(insightface, '__version__', '?')} 的推理"
+                        f"session 跑在 **{prov}** 上")
+                if prov == "CPU":
+                    out += ("\n⚠️ GPU 可用却没被用上 —— 把这段完整输出"
+                            "贴给开发者(多半是 insightface 版本没把"
+                            " providers 传进去)")
+            except Exception as e:  # noqa: BLE001
+                out += f"\n⚠️ insightface 构建失败: {e}"
+        return out
     return (f"⚠️ onnxruntime {ort.__version__} 只有 CPU 后端。装 GPU 版"
             f"(关梯子):\n"
             f"py -3.10 -m pip uninstall -y onnxruntime onnxruntime-directml\n"
