@@ -125,8 +125,12 @@ def main(argv=None) -> int:
         print(f"  提示: {h}")
     if result.warning:
         print(f"WARNING: {result.warning}", file=sys.stderr)
-        print("         (score above is a placeholder; install extras: "
-              "pip install -e '.[fit]')", file=sys.stderr)
+        if "NullScorer" in result.warning:
+            print("         (score above is a placeholder; install extras: "
+                  "pip install -e '.[fit]')", file=sys.stderr)
+    if result.missing:
+        print(f"  目标 VaM 缺 {len(result.missing)} 个精选 morph(未参与拟合):")
+        print(f"  {', '.join(result.missing)}")
 
     out = args.out or f"fit_{int(time.time())}.vap"
     write_vap(out, result.best_morphs)

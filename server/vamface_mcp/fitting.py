@@ -112,6 +112,7 @@ class FitResult:
     neutralized: List[str] = field(default_factory=list)  # 拟合前清零的表情 morph
     stage_count: int = 1                 # coarse-to-fine 的阶段数
     cache_hits: int = 0                  # 截图缓存命中次数(省下的真机来回)
+    missing: List[str] = field(default_factory=list)  # 目标 VaM 缺的精选 morph 名
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,10 @@ class Evaluator:
         self._epoch = 0
         self._cache: Dict[tuple, float] = {}
         self.cache_hits = 0
+        # 目标 VaM 里不存在的 morph 名(set_morphs 回执的 missing 并集)。
+        # 这是校准 morph_presets 的原料 —— 精选名单是按 Genesis 2 惯例猜的,
+        # 必须跟用户实际装的 morph 包对账(对话记忆 第五节)。
+        self.missing: set = set()
 
     def bump_epoch(self) -> None:
         """底层 morph 状态被 evaluate 之外的写动过之后调用,作废旧缓存。"""
@@ -154,7 +159,10 @@ class Evaluator:
             if hit is not None:
                 self.cache_hits += 1
                 return hit
-        self._bridge.set_morphs(cfg.atom, morphs, clamp=True)
+        reply = self._bridge.set_morphs(cfg.atom, morphs, clamp=True)
+        miss = reply.get("missing") if isinstance(reply, dict) else None
+        if miss:
+            self.missing.update(str(m) for m in miss)
         shot = self._bridge.screenshot(max_width=cfg.screenshot_width)
         candidate = decode_png_b64(shot["png_base64"])
         score = self._scorer.score(self._target, candidate)
@@ -411,7 +419,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        style=eff_style, scorer_name=scorer.name,
                        prior_seed=prior_seed, neutralized=neutralized,
                        stage_count=len(stage_names),
-                       cache_hits=evaluate.cache_hits)
+                       cache_hits=evaluate.cache_hits,
+                       missing=sorted(evaluate.missing))
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

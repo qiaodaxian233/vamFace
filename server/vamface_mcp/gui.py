@@ -156,7 +156,14 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
     if result.hints:
         status += "\n" + "\n".join(f"💡 {h}" for h in result.hints[:5])
     if result.warning:
-        status += f"\n⚠️ {result.warning} — 分数是占位值,装拟合依赖: pip install -e '.[fit]'"
+        status += f"\n⚠️ {result.warning}"
+        if "NullScorer" in result.warning:
+            status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.missing:
+        shown = ", ".join(result.missing[:6])
+        more = f" 等 {len(result.missing)} 个" if len(result.missing) > 6 else ""
+        status += (f"\n⚠️ 目标 VaM 缺精选 morph: {shown}{more}"
+                   f" — 这些维度没参与拟合,把完整列表发给开发者校准 morph_presets")
     yield target_img, state["last_img"], status, _score_plot(state["history"]), str(vap_path)
 
 
