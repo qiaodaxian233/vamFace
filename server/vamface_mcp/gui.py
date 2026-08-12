@@ -454,10 +454,14 @@ def build_app():
             host = gr.Textbox(value="127.0.0.1", label="Host", scale=2)
             port = gr.Number(value=8787, label="Port", precision=0, scale=1)
             ping_btn = gr.Button("测试连接", scale=1)
+            backend_btn = gr.Button("打分后端自检", scale=1)
             upd_btn = gr.Button("检查更新", scale=1)
             pull_btn = gr.Button("一键更新 server", scale=1)
             ping_out = gr.Markdown("")
         ping_btn.click(do_ping, [host, port], ping_out)
+        backend_btn.click(lambda: __import__("vamface_mcp.scorers",
+                                             fromlist=["backend_report"]
+                                             ).backend_report(), [], ping_out)
         upd_btn.click(do_check_update, [], ping_out)
         pull_btn.click(do_update_server, [], ping_out)
 

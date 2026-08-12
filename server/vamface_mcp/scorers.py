@@ -258,9 +258,28 @@ def preferred_providers() -> List[str]:
     return out
 
 
+def _actual_provider(app) -> Optional[str]:
+    """从已加载的 onnxruntime session 读**实际**在用的 provider。
+
+    请求 DML 但初始化失败时 ORT 会静默退 CPU —— 标签必须报实况,
+    不然用户装没装对、生没生效永远看不出来(真机第七跑实锤)。"""
+    try:
+        models = getattr(app, "models", None) or {}
+        vals = models.values() if hasattr(models, "values") else models
+        for m in vals:
+            sess = getattr(m, "session", None)
+            if sess is not None and hasattr(sess, "get_providers"):
+                provs = sess.get_providers()
+                if provs:
+                    return str(provs[0])
+    except Exception:
+        pass
+    return None
+
+
 def _build_face_analysis(det: int = 512):
     """建 FaceAnalysis:GPU provider 优先,老版 insightface 不认 providers
-    参数就退回默认构造。返回 (app, provider 短名)。"""
+    参数就退回默认构造。返回 (app, provider 短名 —— 报 session 实况)。"""
     from insightface.app import FaceAnalysis  # 懒加载、重依赖
 
     provs = preferred_providers()
@@ -271,7 +290,33 @@ def _build_face_analysis(det: int = 512):
         app = FaceAnalysis(name="buffalo_l")
         prov_name = "CPU"
     app.prepare(ctx_id=0, det_size=(det, det))
+    actual = _actual_provider(app)
+    if actual:
+        prov_name = _PROVIDER_SHORT.get(actual, actual)
     return app, prov_name
+
+
+def backend_report() -> str:
+    """打分后端一键自检:版本 + 可用 provider + 该修什么(GUI 调试页用)。"""
+    try:
+        import onnxruntime as ort
+    except Exception as e:  # noqa: BLE001
+        return (f"❌ onnxruntime 导入失败: {e}\n"
+                f"多半是 onnxruntime 和 onnxruntime-directml 叠装过留下的残骸。"
+                f"修复(关梯子):\n"
+                f"py -3.10 -m pip uninstall -y onnxruntime onnxruntime-directml\n"
+                f"py -3.10 -m pip install --force-reinstall onnxruntime-directml")
+    provs = list(ort.get_available_providers())
+    gpu = [p for p in provs if p != "CPUExecutionProvider"]
+    if gpu:
+        names = ", ".join(_PROVIDER_SHORT.get(p, p) for p in gpu)
+        return (f"✅ onnxruntime {ort.__version__} · GPU 后端可用: {names}\n"
+                f"下次拟合打分标签应显示 arcface@{_PROVIDER_SHORT.get(gpu[0], gpu[0])}"
+                f"(还是 @CPU 就把这里的输出贴给开发者)")
+    return (f"⚠️ onnxruntime {ort.__version__} 只有 CPU 后端。装 GPU 版"
+            f"(关梯子):\n"
+            f"py -3.10 -m pip uninstall -y onnxruntime onnxruntime-directml\n"
+            f"py -3.10 -m pip install --force-reinstall onnxruntime-directml")
 
 
 class GeometryScorer(Scorer):

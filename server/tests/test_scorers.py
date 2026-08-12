@@ -175,3 +175,41 @@ def test_preferred_providers_no_ort(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "onnxruntime", None)
     assert scorers.preferred_providers() == []
+
+
+def test_actual_provider_reads_session(monkeypatch):
+    from vamface_mcp.scorers import _actual_provider
+
+    class _Sess:
+        def get_providers(self):
+            return ["DmlExecutionProvider", "CPUExecutionProvider"]
+
+    class _Model:
+        session = _Sess()
+
+    class _App:
+        models = {"detection": _Model()}
+
+    assert _actual_provider(_App()) == "DmlExecutionProvider"
+    assert _actual_provider(object()) is None  # 没 session 结构就别硬猜
+
+
+def test_backend_report_states(monkeypatch):
+    import sys, types
+    from vamface_mcp import scorers
+
+    fake = types.ModuleType("onnxruntime")
+    fake.__version__ = "1.23.0"
+    fake.get_available_providers = lambda: ["DmlExecutionProvider",
+                                            "CPUExecutionProvider"]
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+    r = scorers.backend_report()
+    assert "✅" in r and "DirectML" in r
+
+    fake.get_available_providers = lambda: ["CPUExecutionProvider"]
+    r = scorers.backend_report()
+    assert "⚠️" in r and "force-reinstall" in r
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
+    r = scorers.backend_report()
+    assert "❌" in r and "残骸" in r
