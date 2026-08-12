@@ -590,6 +590,10 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
         cand = (list(basis_candidates) if basis_candidates is not None
                 else character_head_candidates(rows))
         if cand:
+            # 上一跑留在场景里的基底会抬高 baseline,让候选"打不过残留的
+            # 自己"被错误放弃 —— 先把所有候选清零再量基线
+            bridge.set_morphs(cfg.atom, {c: 0.0 for c in cand}, clamp=True)
+            evaluate.bump_epoch()
             base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
             baseline = evaluate(base_vals)
             history_all.append(baseline)
@@ -617,34 +621,48 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     # ---- 本地校准模型(v0.7):量斜率 → 解方程,不瞎猜 -----------------------
     jacobian_note = ""
     pre_best: Optional[Tuple[Dict[str, float], float]] = None
-    if use_jacobian and geo is not None and budget > 6:
+    geo_cal = find_geometry_scorer(scorer)  # 校准不和 use_prior 连坐
+    if use_jacobian and geo_cal is not None and budget > 6:
         from .calibrate import (jacobian_polish, load_jacobian,
                                 probe_jacobian, save_jacobian)
         basis_tag = ",".join(f"{k}={v:g}" for k, v in sorted(basis.items()))
-        J = load_jacobian(cfg.morph_names, cfg.screenshot_width, basis_tag)
-        if J is not None:
-            jacobian_note = f"缓存复用({len(J)} 个滑块已测)"
+        J = load_jacobian(cfg.morph_names, cfg.screenshot_width,
+                          basis_tag) or {}
+        todo = [n for n in cfg.morph_names if n not in J]
+        total = len(cfg.morph_names)
+        if not todo:
+            jacobian_note = f"缓存复用({len(J)}/{total} 个滑块已测)"
         else:
-            base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+            need = len(todo) + 1
             probe_cap = max(0, budget - 10)  # 至少给后面留 10 次
-            J, used, ph = probe_jacobian(evaluate, geo, base_vals,
-                                         cfg.morph_names,
-                                         lambda n: _bounds_for(cfg, n),
-                                         budget=probe_cap)
-            history_all.extend(ph)
-            budget -= used
-            if J:
-                save_jacobian(J, cfg.morph_names, cfg.screenshot_width,
-                              basis_tag)
-                jacobian_note = f"新测 {len(J)} 个滑块(已落盘,下次免费)"
+            if probe_cap < min(need, 4):
+                # 连几个滑块都测不起 —— 别白烧,直接告诉用户差多少
+                jacobian_note = (f"预算不够校准:还差 {len(todo)} 个滑块没测"
+                                 f"(约需 {need} 次评估,只剩 {probe_cap})。"
+                                 f"把评估预算拉到 ≥{cfg.max_iters + need + 20}"
+                                 f" 再跑,测完落盘后就一劳永逸")
             else:
-                jacobian_note = ("校准失败:基线连拍都检不出人脸 —— 场景太暗/"
-                                 "偏色或脸太小。把灯光调成中性白、拉亮拉平,"
-                                 "脸占画面 1/3 以上再跑(这也是分数不涨的主因)")
-        if J and budget > 2:
+                base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+                Jn, used, ph = probe_jacobian(evaluate, geo_cal, base_vals,
+                                              todo,
+                                              lambda n: _bounds_for(cfg, n),
+                                              budget=probe_cap)
+                history_all.extend(ph)
+                budget -= used
+                if Jn or J:
+                    J.update(Jn)
+                    save_jacobian(J, cfg.morph_names, cfg.screenshot_width,
+                                  basis_tag)
+                    jacobian_note = (f"新测 {len(Jn)} 个滑块,累计 "
+                                     f"{len(J)}/{total}(已落盘,复跑免费)")
+                else:
+                    jacobian_note = ("校准失败:基线连拍都检不出人脸 —— 场景"
+                                     "太暗/偏色或脸太小。把灯光调成中性白、"
+                                     "拉亮拉平,脸占画面 1/3 以上再跑")
+        if len(J) >= 3 and budget > 2:
             x0 = {n: seed.get(n, 0.0) for n in cfg.morph_names}
             bx, bs, used, ph = jacobian_polish(
-                evaluate, geo, J, x0, cfg.morph_names,
+                evaluate, geo_cal, J, x0, cfg.morph_names,
                 lambda n: _bounds_for(cfg, n),
                 iters=6, budget=max(2, budget // 3))
             history_all.extend(ph)

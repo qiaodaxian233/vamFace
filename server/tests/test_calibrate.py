@@ -233,3 +233,64 @@ def test_fit_face_health_when_target_photo_undetectable(tmp_path):
     res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
                    scorer=geo, use_prior=False, neutralize=False)
     assert "目标照片本身检不出" in res.health
+
+
+# ---------------------------------------------------------------------------
+# v0.7.3:增量校准累积 + 预算守门 + 基底扫描前清残留
+# ---------------------------------------------------------------------------
+
+def test_calibration_accumulates_across_starved_runs(tmp_path, monkeypatch):
+    """预算饿死只测了一部分 → 下一跑接着测没测的,累计落盘(真机第七跑:
+    默认预算 60 被基底吃光,43 个滑块只测了 1 个)。"""
+    monkeypatch.setattr(calibrate, "CACHE_DIR", tmp_path / "cache")
+    tp = _target_png(tmp_path)
+
+    # 第一跑:预算掐到刚好只能测一部分
+    bridge = _MockFitBridge()
+    cfg1 = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                     max_iters=14, use_cache=False, screenshot_width=512)
+    res1 = fit_face(bridge, tp, cfg1, optimizer="greedy",
+                    scorer=GeometryScorer(features_from_mock),
+                    use_prior=False, neutralize=False, use_jacobian=True)
+    assert "累计" in res1.jacobian_note
+
+    # 第二跑:足额预算,只补没测的,最终 4/4 全齐
+    bridge2 = _MockFitBridge()
+    cfg2 = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                     max_iters=40, use_cache=False, screenshot_width=512)
+    res2 = fit_face(bridge2, tp, cfg2, optimizer="greedy",
+                    scorer=GeometryScorer(features_from_mock),
+                    use_prior=False, neutralize=False, use_jacobian=True)
+    assert ("4/4" in res2.jacobian_note) or ("缓存复用(4/4" in res2.jacobian_note)
+
+
+def test_calibration_budget_guard_recommends_number(tmp_path, monkeypatch):
+    """预算连几个滑块都测不起 → 不白烧,直接给出确切的推荐预算。"""
+    monkeypatch.setattr(calibrate, "CACHE_DIR", tmp_path / "cache")
+    bridge = _MockFitBridge()
+    cfg = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                    max_iters=12, use_cache=False, screenshot_width=512)
+    res = fit_face(bridge, _target_png(tmp_path), cfg, optimizer="greedy",
+                   scorer=GeometryScorer(features_from_mock),
+                   use_prior=True, neutralize=False, use_jacobian=True)
+    assert "预算不够校准" in res.jacobian_note
+    assert "≥" in res.jacobian_note
+
+
+def test_basis_baseline_clears_leftover_state(tmp_path):
+    """上一跑的基底残留在场景里会抬高 baseline —— 扫描前必须清零全部候选。"""
+    from tests.test_basis import _HeadBridge, _BrightScorer
+    from PIL import Image
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(tpath)
+
+    bridge = _HeadBridge()
+    bridge.state["TestFace"] = 1.0  # 残留:上次拟合留下的基底
+    cfg = FitConfig(atom="Person", max_iters=14, use_cache=False,
+                    morph_names=["Nose Size"])
+    res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+                   scorer=_BrightScorer(), use_prior=False, neutralize=False,
+                   use_basis=True)
+    # 残留被清零后重新公平选拔,TestFace 仍然当选(它确实最像)
+    assert res.basis == {"TestFace": 1.0}
+    assert res.best_score >= 0.99

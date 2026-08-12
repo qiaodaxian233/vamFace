@@ -477,7 +477,8 @@ def build_app():
                 jac = gr.Checkbox(value=True, scale=2,
                                   label="本地校准模型(首跑逐滑块实测'动脸多少'并落盘,"
                                         "之后按方程解,不瞎猜)")
-                iters = gr.Slider(10, 400, value=60, step=10, label="评估预算", scale=2)
+                iters = gr.Slider(10, 600, value=300, step=10,
+                                  label="评估预算(基底+校准全开建议 ≥250)", scale=2)
                 width = gr.Slider(256, 1024, value=512, step=64, label="截图宽度", scale=1)
             groups = gr.CheckboxGroup(sorted(FACE_MORPH_GROUPS),
                                       value=sorted(FACE_MORPH_GROUPS),
