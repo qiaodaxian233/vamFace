@@ -160,10 +160,10 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
     if result.missing:
-        shown = ", ".join(result.missing[:6])
-        more = f" 等 {len(result.missing)} 个" if len(result.missing) > 6 else ""
-        status += (f"\n⚠️ 目标 VaM 缺精选 morph: {shown}{more}"
-                   f" — 这些维度没参与拟合,把完整列表发给开发者校准 morph_presets")
+        status += (f"\n⚠️ 目标 VaM 缺 {len(result.missing)} 个精选 morph"
+                   f"(未参与拟合): {', '.join(result.missing)}\n"
+                   f" → 到连接调试页点「导出 morph 清单」,把 JSON 发给开发者"
+                   f"校准 morph_presets")
     yield target_img, state["last_img"], status, _score_plot(state["history"]), str(vap_path)
 
 
@@ -241,6 +241,34 @@ def do_apply_tone(host, port, atom, photo_path, selected_params):
 # ---------------------------------------------------------------------------
 # Tab 3: 连接调试
 # ---------------------------------------------------------------------------
+
+def do_export_morphs(host, port, atom):
+    """把目标 VaM 的完整 morph 名单导出成 JSON,用于校准 morph_presets。"""
+    try:
+        bridge = _get_bridge(host, port)
+        rows: list = []
+        # limit 分页拉全:插件按 limit 截断,total 告诉我们还有没有
+        data = bridge.list_morphs(atom or "Person", limit=100000)
+        rows = data.get("morphs") or []
+        total = data.get("total", len(rows))
+        from .morph_presets import FACE_MORPH_GROUPS
+        selected = {n for grp in FACE_MORPH_GROUPS.values() for n in grp}
+        names = {r.get("name") for r in rows}
+        missing = sorted(selected - names)
+        path = OUT_DIR / f"vam_morphs_{int(time.time())}.json"
+        path.write_text(json.dumps({
+            "atom": atom or "Person",
+            "total": total,
+            "preset_missing": missing,
+            "morphs": rows,
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        msg = (f"✅ 导出 {len(rows)}/{total} 个 morph → {path.name}\n"
+               f"精选名单缺 {len(missing)} 个: {', '.join(missing) or '无'}\n"
+               f"把这个 JSON 发给开发者,按你的实际 morph 包校准 presets。")
+        return msg, str(path)
+    except Exception as e:  # noqa: BLE001 — 界面内报错,不抛不阻塞
+        return f"❌ {e}", None
+
 
 def do_ping(host, port):
     try:
@@ -521,6 +549,14 @@ def build_app():
                 dbg_btn = gr.Button("查看")
             dbg_out = gr.Code(label="结果", language="json")
             dbg_btn.click(do_inspect, [host, port, dbg_atom, dbg_storable], dbg_out)
+
+            gr.Markdown("### 导出 morph 清单(校准 presets 用)")
+            with gr.Row():
+                exp_btn = gr.Button("导出 morph 清单", variant="primary", scale=1)
+                exp_file = gr.File(label="下载", scale=2)
+            exp_out = gr.Markdown("")
+            exp_btn.click(do_export_morphs, [host, port, dbg_atom],
+                          [exp_out, exp_file])
 
             gr.Markdown("### 更新插件到 VaM\n"
                         f"把随包发行的 VamFaceBridge.cs(v{plugin_source_version() or '?'})"
