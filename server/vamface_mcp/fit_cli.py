@@ -63,6 +63,8 @@ def main(argv=None) -> int:
     parser.add_argument("--no-cache", action="store_true",
                         help="禁用截图缓存(默认开: 重访相同 morph 向量直接复用分数)")
     parser.add_argument("--iters", type=int, default=60, help="evaluation budget")
+    parser.add_argument("--jacobian", action="store_true",
+                        help="本地校准模型:逐滑块实测斜率(落盘复用)后解方程拟合")
     parser.add_argument("--basis", action="store_true",
                         help="先扫整头角色 morph 当起点(v0.6 基底粗定位)")
     parser.add_argument("--groups", nargs="*", choices=sorted(FACE_MORPH_GROUPS),
@@ -107,7 +109,7 @@ def main(argv=None) -> int:
     t0 = time.time()
     try:
         result = fit_face(bridge, str(photo), cfg, optimizer=args.optimizer,
-                          use_basis=args.basis,
+                          use_basis=args.basis, use_jacobian=args.jacobian,
                           style=args.style, anime_onnx=args.anime_onnx,
                           use_prior=not args.no_prior,
                           neutralize=not args.no_neutralize,
@@ -131,6 +133,8 @@ def main(argv=None) -> int:
         if "NullScorer" in result.warning:
             print("         (score above is a placeholder; install extras: "
                   "pip install -e '.[fit]')", file=sys.stderr)
+    if result.jacobian_note:
+        print(f"  本地校准模型: {result.jacobian_note}")
     if result.basis_missing:
         print(f"  基底废票(列表里有但设不进去,插件侧线索): "
               f"{', '.join(result.basis_missing)}")

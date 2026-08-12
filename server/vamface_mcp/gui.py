@@ -90,7 +90,7 @@ def _score_plot(history: List[float]):
 # Tab 1: 照片拟合
 # ---------------------------------------------------------------------------
 
-def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, iters, groups, width):
+def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, jac, iters, groups, width):
     """Generator: streams live progress to the UI while fitting runs."""
     if not photo_path:
         yield None, None, "请先上传目标照片", None, None
@@ -124,7 +124,8 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, iters, g
             state["result"] = fit_face(bridge, photo_path, cfg,
                                        optimizer=optimizer, style=style,
                                        coarse_to_fine=bool(c2f),
-                                       use_basis=bool(basis))
+                                       use_basis=bool(basis),
+                                       use_jacobian=bool(jac))
         except Exception as e:  # BridgeError or optimizer failure
             state["error"] = str(e)
         finally:
@@ -160,6 +161,8 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, iters, g
         status += f"\n⚠️ {result.warning}"
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.jacobian_note:
+        status += f"\n📐 本地校准模型: {result.jacobian_note}"
     if result.basis_missing:
         status += (f"\n⚠️ {len(result.basis_missing)} 个基底候选列表里有但设不进去"
                    f"(已跳过,插件侧线索): {', '.join(result.basis_missing)}")
@@ -469,6 +472,9 @@ def build_app():
                 basis = gr.Checkbox(value=True, scale=2,
                                     label="角色基底粗定位(先扫整头角色 morph 当起点,"
                                           "每个候选吃 1 次评估)")
+                jac = gr.Checkbox(value=True, scale=2,
+                                  label="本地校准模型(首跑逐滑块实测'动脸多少'并落盘,"
+                                        "之后按方程解,不瞎猜)")
                 iters = gr.Slider(10, 400, value=60, step=10, label="评估预算", scale=2)
                 width = gr.Slider(256, 1024, value=512, step=64, label="截图宽度", scale=1)
             groups = gr.CheckboxGroup(sorted(FACE_MORPH_GROUPS),
@@ -478,7 +484,7 @@ def build_app():
             fit_status = gr.Markdown("")
             fit_plot = gr.Plot(label="分数曲线")
             fit_vap = gr.File(label="导出的 .vap 预设")
-            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, c2f, basis, iters, groups, width],
+            fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, c2f, basis, jac, iters, groups, width],
                           [photo, current, fit_status, fit_plot, fit_vap])
 
         with gr.Tab("手动微调"):

@@ -193,7 +193,8 @@ def vam_fit_face(target_image: str, atom: str = "Person",
                  anime_onnx: Optional[str] = None,
                  use_prior: bool = True, neutralize: bool = True,
                  coarse_to_fine: bool = False,
-                 use_basis: bool = False) -> Dict[str, Any]:
+                 use_basis: bool = False,
+                 use_jacobian: bool = False) -> Dict[str, Any]:
     """Automatically fit the VaM face to a target photo.
 
     Runs a black-box optimization loop: set morphs -> screenshot ->
@@ -245,7 +246,8 @@ def vam_fit_face(target_image: str, atom: str = "Person",
         result = fit_face(_bridge, target_image, cfg, optimizer=optimizer,
                           style=style, anime_onnx=anime_onnx,
                           use_prior=use_prior, neutralize=neutralize,
-                          coarse_to_fine=coarse_to_fine, use_basis=use_basis)
+                          coarse_to_fine=coarse_to_fine, use_basis=use_basis,
+                          use_jacobian=use_jacobian)
 
         out: Dict[str, Any] = {
             "ok": True,
@@ -262,6 +264,8 @@ def vam_fit_face(target_image: str, atom: str = "Person",
             out["basis"] = result.basis
         if result.basis_missing:
             out["basis_missing"] = result.basis_missing
+        if result.jacobian_note:
+            out["jacobian"] = result.jacobian_note
         if result.renamed:
             out["renamed"] = result.renamed
         if result.missing:

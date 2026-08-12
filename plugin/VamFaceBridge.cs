@@ -40,7 +40,7 @@ namespace VamFace
 {
     public class VamFaceBridge : MVRScript
     {
-        private const string VERSION = "0.6.2";
+        private const string VERSION = "0.7.0";
         // 与 server 端 vamface_mcp.PROTOCOL_VERSION 对账,改协议时两边同步 +1。
         private const int PROTOCOL = 1;
         private const int DEFAULT_PORT = 8787;
@@ -908,7 +908,15 @@ namespace VamFace
             // camera arg: default true; {"camera": false} forces the old
             // whole-screen grab (debug / comparison).
             bool wantCamera = args["camera"] == null || args["camera"].AsBool;
+            // v0.7:等 morph 真正应用到网格再拍。set_morphs 改的是 morphValue,
+            // 蒙皮在后续帧才更新 —— 立刻拍可能拍到旧脸,分数张冠李戴,优化器
+            // 在被污染的地形上爬(用户实感:"游戏变化比截图快")。默认等 2 帧
+            // (~2×帧时),{"settle_frames": N} 可调。
+            int settleFrames = args["settle_frames"] != null ? args["settle_frames"].AsInt : 2;
+            if (settleFrames < 0) settleFrames = 0;
+            if (settleFrames > 10) settleFrames = 10;
 
+            for (int i = 0; i < settleFrames; i++) yield return null;
             yield return new WaitForEndOfFrame();
 
             byte[] png = null;

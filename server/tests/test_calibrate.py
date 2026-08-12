@@ -1,0 +1,160 @@
+"""v0.7 本地校准模型:实测斜率 → 解方程,拟合从瞎蒙变定向。"""
+import numpy as np
+import pytest
+
+from vamface_mcp import calibrate
+from vamface_mcp.calibrate import (jacobian_polish, load_jacobian,
+                                   probe_jacobian, save_jacobian, solve_step)
+from vamface_mcp.fitting import FitConfig, fit_face, make_evaluator
+from vamface_mcp.mock_vam import FaceRenderer, features_from_mock
+from vamface_mcp.scorers import GeometryScorer
+
+
+# ---------------------------------------------------------------------------
+# solve_step:欠定系统上岭回归解出正确方向,步长有夹
+# ---------------------------------------------------------------------------
+
+def test_solve_step_recovers_direction_and_clips():
+    J = {"M1": {"eye_gap": 0.05}, "M2": {"mouth_w": 0.04},
+         "M3": {"eye_gap": 0.01, "mouth_w": -0.01}}
+    residual = {"eye_gap": 0.10, "mouth_w": -0.08}  # 目标眼距更宽、嘴更窄
+    d = solve_step(J, residual, ["M1", "M2", "M3"])
+    assert d["M1"] > 0 and d["M2"] < 0                 # 方向对
+    assert all(abs(v) <= 0.5 + 1e-9 for v in d.values())  # 步长夹在 step_clip 内
+
+
+def test_solve_step_empty_when_nothing_shared():
+    assert solve_step({"M": {"eye_gap": 1.0}}, {"jaw_len": 0.1}, ["M"]) == {}
+
+
+# ---------------------------------------------------------------------------
+# 缓存往返
+# ---------------------------------------------------------------------------
+
+def test_jacobian_cache_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(calibrate, "CACHE_DIR", tmp_path)
+    J = {"Nose Size": {"nose_len": 0.033}}
+    save_jacobian(J, ["Nose Size"], 512, basis_tag="B=1")
+    assert load_jacobian(["Nose Size"], 512, basis_tag="B=1") == J
+    assert load_jacobian(["Nose Size"], 512, basis_tag="") is None   # 基底不同
+    assert load_jacobian(["Nose Size"], 256, basis_tag="B=1") is None  # 宽度不同
+
+
+# ---------------------------------------------------------------------------
+# mock 全链路:探针量出真斜率;解方程拿小预算逼近隐藏目标
+# ---------------------------------------------------------------------------
+
+class _MockFitBridge:
+    """直连 FaceRenderer 的桥接(不开 TCP),隐藏目标由测试指定。"""
+
+    def __init__(self):
+        self.renderer = FaceRenderer()
+        self.state = {}
+
+    def list_morphs(self, atom, filter="", region="", limit=200):
+        from vamface_mcp.mock_vam import MORPH_DEFS
+        rows = [{"name": n, "uid": f"mock/{n}", "region": g,
+                 "value": self.state.get(n, 0.0), "min": lo, "max": hi}
+                for n, (g, lo, hi) in MORPH_DEFS.items()]
+        return {"count": len(rows), "total": len(rows), "morphs": rows}
+
+    def set_morphs(self, atom, values, clamp=True):
+        self.state.update({k: float(v) for k, v in values.items()})
+        return {"ok": True, "applied": len(values), "missing": []}
+
+    def get_morphs(self, atom, changed_only=True):
+        return dict(self.state)
+
+    def screenshot(self, max_width=512):
+        import base64
+        import io
+        img = self.renderer.render(self.state)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return {"png_base64": base64.b64encode(buf.getvalue()).decode()}
+
+
+HIDDEN = {"Eyes Width Spacing": 0.55, "Mouth Width": -0.45, "Nose Size": 0.4}
+PROBE_NAMES = ["Eyes Width Spacing", "Mouth Width", "Nose Size", "Jaw Size"]
+
+
+def _target_png(tmp_path):
+    p = tmp_path / "target.png"
+    FaceRenderer().render(HIDDEN).save(p)
+    return str(p)
+
+
+def _geo_scorer():
+    return GeometryScorer(features_from_mock)
+
+
+def test_probe_jacobian_measures_real_slopes(tmp_path):
+    bridge = _MockFitBridge()
+    cfg = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                    max_iters=99, use_cache=False, screenshot_width=512)
+    geo = _geo_scorer()
+    from vamface_mcp.fitting import load_image
+    target = load_image(_target_png(tmp_path))
+    ev = make_evaluator(bridge, target, geo, cfg)
+
+    J, used, hist = probe_jacobian(ev, geo, {n: 0.0 for n in PROBE_NAMES},
+                                   PROBE_NAMES, lambda n: (-1.0, 1.0))
+    assert used == 1 + len(PROBE_NAMES)
+    # mock 里 Eyes Width Spacing 直接驱动 eye_gap,斜率必须显著非零
+    assert "Eyes Width Spacing" in J and "eye_gap" in J["Eyes Width Spacing"]
+    assert abs(J["Eyes Width Spacing"]["eye_gap"]) > 1e-3
+    # 探针结束场景要回到基线
+    assert all(abs(v) < 1e-9 for v in bridge.state.values())
+
+
+def test_jacobian_polish_converges_fast(tmp_path):
+    """解方程 vs 黑盒:同一隐藏目标,校准 + 少量 GN 步就把几何残差打穿。"""
+    bridge = _MockFitBridge()
+    cfg = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                    max_iters=99, use_cache=False, screenshot_width=512)
+    geo = _geo_scorer()
+    from vamface_mcp.fitting import load_image
+    target = load_image(_target_png(tmp_path))
+    ev = make_evaluator(bridge, target, geo, cfg)
+
+    base = {n: 0.0 for n in PROBE_NAMES}
+    s_base = ev(dict(base))
+    J, _, _ = probe_jacobian(ev, geo, base, PROBE_NAMES,
+                             lambda n: (-1.0, 1.0))
+    r0 = dict(geo.last_diff)  # 起点残差(evaluate(base) 之后的)
+    ev(dict(base))             # 回到基线,拿干净的起点残差
+    r0 = dict(geo.last_diff)
+    bx, bs, used, _ = jacobian_polish(ev, geo, J, base, PROBE_NAMES,
+                                      lambda n: (-1.0, 1.0), iters=6)
+    ev(dict(bx))               # 在最优点上量收敛后残差
+    r1 = dict(geo.last_diff)
+    shrink = (abs(r1.get("eye_gap", 0)) + abs(r1.get("mouth_w", 0))) / \
+             max(1e-9, abs(r0.get("eye_gap", 0)) + abs(r0.get("mouth_w", 0)))
+    assert shrink < 0.4, f"主残差没打下去: 收敛比 {shrink:.2f}"
+    assert bs >= s_base
+    assert used <= 7
+    # 隐藏目标的主方向要被解出来(符号正确)
+    assert bx["Eyes Width Spacing"] > 0.25
+    assert bx["Mouth Width"] < -0.15
+
+
+def test_fit_face_with_jacobian_end_to_end(tmp_path, monkeypatch):
+    """fit_face(use_jacobian=True) 全链路:校准落盘 + note 上报 + 分数达标。"""
+    monkeypatch.setattr(calibrate, "CACHE_DIR", tmp_path / "cache")
+    bridge = _MockFitBridge()
+    scorer = GeometryScorer(features_from_mock)
+
+    cfg = FitConfig(atom="Person", morph_names=list(PROBE_NAMES),
+                    max_iters=30, use_cache=False, screenshot_width=512)
+    res = fit_face(bridge, _target_png(tmp_path), cfg, optimizer="greedy",
+                   scorer=scorer, use_prior=True, neutralize=False,
+                   use_jacobian=True)
+    assert "新测" in res.jacobian_note
+    assert res.best_score > 0.8
+
+    # 第二跑:缓存命中,探针评估全免
+    bridge2 = _MockFitBridge()
+    res2 = fit_face(bridge2, _target_png(tmp_path), cfg, optimizer="greedy",
+                    scorer=GeometryScorer(features_from_mock),
+                    use_prior=True, neutralize=False, use_jacobian=True)
+    assert "缓存复用" in res2.jacobian_note

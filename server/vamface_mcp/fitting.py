@@ -116,6 +116,7 @@ class FitResult:
     renamed: Dict[str, str] = field(default_factory=dict)  # 别名解析:概念名→实际名
     basis: Dict[str, float] = field(default_factory=dict)  # 角色基底 {整头morph: 权重}
     basis_missing: List[str] = field(default_factory=list)  # 列表里有但 set 被拒的基底候选
+    jacobian_note: str = ""              # 本地校准模型状态(新测/缓存/失败)
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +451,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
              coarse_to_fine: bool = False,
              stages: Optional[List[List[str]]] = None,
              use_basis: bool = False,
-             basis_candidates: Optional[List[str]] = None) -> FitResult:
+             basis_candidates: Optional[List[str]] = None,
+             use_jacobian: bool = False) -> FitResult:
     """v0.4 拟合入口:表情归一化 → 先验探针 → (分阶段)黑盒优化 → 提示。
 
     style: auto | real | anime | pixel(见 scorers.build_scorer_stack)
@@ -464,6 +466,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     use_basis: v0.6 角色基底粗定位 —— 先扫整头角色 morph 找最像的当起点,
                再精修(候选默认从 list_morphs 的 Head 区自动挑,也可用
                basis_candidates 显式给)。每个候选吃一次评估,计入预算。
+    use_jacobian: v0.7 本地校准模型 —— 逐 morph 实测"这根滑块动脸多少"
+               (首跑 ~1 评估/滑块,结果落盘,同配置复跑免费),然后按
+               残差解方程走 Gauss-Newton,几何维度直接收敛,CMA 只收尾。
     """
     from .priors import order_by_prior, seed_from_diff
 
@@ -590,6 +595,42 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             for k, v in prior_seed.items():
                 seed.setdefault(k, v)  # 用户显式给的种子优先于先验
 
+    # ---- 本地校准模型(v0.7):量斜率 → 解方程,不瞎猜 -----------------------
+    jacobian_note = ""
+    pre_best: Optional[Tuple[Dict[str, float], float]] = None
+    if use_jacobian and geo is not None and budget > 6:
+        from .calibrate import (jacobian_polish, load_jacobian,
+                                probe_jacobian, save_jacobian)
+        basis_tag = ",".join(f"{k}={v:g}" for k, v in sorted(basis.items()))
+        J = load_jacobian(cfg.morph_names, cfg.screenshot_width, basis_tag)
+        if J is not None:
+            jacobian_note = f"缓存复用({len(J)} 个滑块已测)"
+        else:
+            base_vals = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+            probe_cap = max(0, budget - 10)  # 至少给后面留 10 次
+            J, used, ph = probe_jacobian(evaluate, geo, base_vals,
+                                         cfg.morph_names,
+                                         lambda n: _bounds_for(cfg, n),
+                                         budget=probe_cap)
+            history_all.extend(ph)
+            budget -= used
+            if J:
+                save_jacobian(J, cfg.morph_names, cfg.screenshot_width,
+                              basis_tag)
+                jacobian_note = f"新测 {len(J)} 个滑块(已落盘,下次免费)"
+            else:
+                jacobian_note = "校准失败(基线检不出脸),退回黑盒"
+        if J and budget > 2:
+            x0 = {n: seed.get(n, 0.0) for n in cfg.morph_names}
+            bx, bs, used, ph = jacobian_polish(
+                evaluate, geo, J, x0, cfg.morph_names,
+                lambda n: _bounds_for(cfg, n),
+                iters=6, budget=max(2, budget // 3))
+            history_all.extend(ph)
+            budget -= used
+            seed.update(bx)          # CMA 从解出来的点起步
+            pre_best = (bx, bs)      # CMA 收尾没超过它就用它
+
     # ---- 阶段划分与预算分摊 --------------------------------------------------
     if stages is None and coarse_to_fine:
         stages = DEFAULT_STAGES
@@ -627,6 +668,11 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             for k, v in _prior(geo.last_diff).items():
                 seed.setdefault(k, v)
 
+    if pre_best is not None and pre_best[1] > best_score:
+        best_morphs = dict(basis)
+        best_morphs.update(pre_best[0])
+        best_score = pre_best[1]
+
     # leave VaM showing the best result
     bridge.set_morphs(cfg.atom, best_morphs, clamp=True)
     result = FitResult(best_score=best_score, best_morphs=best_morphs,
@@ -637,7 +683,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        cache_hits=evaluate.cache_hits,
                        missing=sorted(set(evaluate.missing) - set(basis_missing)),
                        renamed=renamed, basis=basis,
-                       basis_missing=sorted(basis_missing))
+                       basis_missing=sorted(basis_missing),
+                       jacobian_note=jacobian_note)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)
