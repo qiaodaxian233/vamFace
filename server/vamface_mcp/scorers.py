@@ -296,6 +296,7 @@ class GeometryScorer(Scorer):
         self._target_cache: Optional[Tuple[int, Optional[FeatureDict]]] = None
         self.last_diff: FeatureDict = {}   # 最近一次 candidate 相对 target 的差
         self.detect_misses = 0             # candidate 检不出脸的累计次数
+        self.target_undetected = False     # 目标照片本身检不出脸(致命,要上报)
         # 目标 VaM 的 morph 可用性(None = 未知,不过滤)与 概念名→实际名 改名表
         self._avail_norm: Optional[set] = None
         self._hint_rename: Dict[str, str] = {}
@@ -329,6 +330,7 @@ class GeometryScorer(Scorer):
     def score(self, target: np.ndarray, candidate: np.ndarray) -> float:
         tf = self._target_features(target)
         if tf is None:
+            self.target_undetected = True  # 目标照本身检不出:一切都白搭,要上报
             return 0.0
         cf = self._extract(candidate)
         if cf is None:

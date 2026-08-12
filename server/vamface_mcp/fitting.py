@@ -117,6 +117,7 @@ class FitResult:
     basis: Dict[str, float] = field(default_factory=dict)  # 角色基底 {整头morph: 权重}
     basis_missing: List[str] = field(default_factory=list)  # 列表里有但 set 被拒的基底候选
     jacobian_note: str = ""              # 本地校准模型状态(新测/缓存/失败)
+    health: str = ""                     # 检测健康度警告(空 = 正常)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +312,15 @@ DEFAULT_STAGES: List[List[str]] = [
 _CHARACTER_HEAD_EXCLUDE = (
     "scale", "width", "length", "height", "size", "define", "round",
     "flat", "slope", "wrinkle", "puffy", "neck", "smooth", "shape",
+    "sag", "bags", "socket", "depth",
+)
+# 以解剖部位开头的也是特征滑块("Eye Bags"/"Face Sag"/"Nostrils Lower
+# Depth" 这类,用户新装的包实测混进过 Head 区)。注意只查**前缀**:
+# "Carmen Face"/"Tara Face" 这类角色名不受伤。
+_CHARACTER_HEAD_PART_PREFIXES = (
+    "eye", "nose", "nostril", "mouth", "lip", "brow", "forehead",
+    "face ", "chin", "jaw", "cheek", "ear ", "ears", "teeth", "tongue",
+    "cranium", "skull", "neck", "head ", "lower ", "upper ",
 )
 
 
@@ -328,6 +338,8 @@ def character_head_candidates(rows: List[Dict[str, Any]]) -> List[str]:
         name = str(r.get("name", "")).strip()
         low = name.lower()
         if not name or any(w in low for w in _CHARACTER_HEAD_EXCLUDE):
+            continue
+        if low.startswith(_CHARACTER_HEAD_PART_PREFIXES):
             continue
         out.append(name)
     return out
@@ -545,7 +557,14 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             log.warning("expression neutralization failed (ignored)", exc_info=True)
 
     evaluate = make_evaluator(bridge, target, scorer, cfg)
-    evaluate.missing.update(unresolved)  # 解析阶段就确认缺失的,不用等回执
+    # 按设计可由其他槽位覆盖的概念(如 Lips Thickness = 上唇厚 + 下唇厚),
+    # 覆盖槽位都活着就不算缺失 —— 不再拿"校准 presets"的提示烦用户。
+    from .morph_presets import COVERED_BY
+    report_unresolved = [n for n in unresolved
+                         if not (n in COVERED_BY and
+                                 all(c in (resolution.mapping if resolution
+                                           else {}) for c in COVERED_BY[n]))]
+    evaluate.missing.update(report_unresolved)
 
     # ---- 先验探针:一次基线评估 → 特征差 → 初始种子 ------------------------
     # FEATURE_TO_MORPHS 用概念名,产出的种子键要过 to_act 翻译成实际名。
@@ -619,7 +638,9 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                               basis_tag)
                 jacobian_note = f"新测 {len(J)} 个滑块(已落盘,下次免费)"
             else:
-                jacobian_note = "校准失败(基线检不出脸),退回黑盒"
+                jacobian_note = ("校准失败:基线连拍都检不出人脸 —— 场景太暗/"
+                                 "偏色或脸太小。把灯光调成中性白、拉亮拉平,"
+                                 "脸占画面 1/3 以上再跑(这也是分数不涨的主因)")
         if J and budget > 2:
             x0 = {n: seed.get(n, 0.0) for n in cfg.morph_names}
             bx, bs, used, ph = jacobian_polish(
@@ -668,6 +689,18 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             for k, v in _prior(geo.last_diff).items():
                 seed.setdefault(k, v)
 
+    health = ""
+    geo_any = find_geometry_scorer(scorer)
+    if geo_any is not None and getattr(geo_any, "target_undetected", False):
+        health = ("⚠️ 目标照片本身检不出人脸!换一张正面、清晰、光线均匀的"
+                  "照片 —— 现在所有分数都是无效的")
+    elif geo_any is not None and history_all:
+        miss_ratio = geo_any.detect_misses / max(1, len(history_all))
+        if miss_ratio > 0.25:
+            health = (f"⚠️ {miss_ratio:.0%} 的评估检不出人脸,分数被噪声主导!"
+                      f"灯光调中性白、拉亮拉平(现在的暗调/偏色打光是检测器"
+                      f"杀手),正对脸、脸占画面 1/3 以上,再跑才有意义")
+
     if pre_best is not None and pre_best[1] > best_score:
         best_morphs = dict(basis)
         best_morphs.update(pre_best[0])
@@ -684,7 +717,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        missing=sorted(set(evaluate.missing) - set(basis_missing)),
                        renamed=renamed, basis=basis,
                        basis_missing=sorted(basis_missing),
-                       jacobian_note=jacobian_note)
+                       jacobian_note=jacobian_note, health=health)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

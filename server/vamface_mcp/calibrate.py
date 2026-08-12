@@ -105,12 +105,17 @@ def probe_jacobian(evaluate, geo, base_vals: Dict[str, float],
     history: List[float] = []
     used = 0
 
-    s0 = evaluate(dict(base_vals))
-    history.append(s0)
-    used += 1
-    diff0 = dict(geo.last_diff)
+    diff0: Dict[str, float] = {}
+    for attempt in range(3):  # 检测会帧间抖动,基线多拍两张再放弃
+        s0 = evaluate(dict(base_vals))
+        history.append(s0)
+        used += 1
+        diff0 = dict(geo.last_diff)
+        if diff0:
+            break
+        evaluate.bump_epoch()  # 相同向量会命中缓存,bump 强制重拍
     if not diff0:
-        log.warning("校准基线检不出脸,放弃(灯光/机位问题?)")
+        log.warning("校准基线连拍 3 次都检不出脸,放弃(灯光/机位问题)")
         return {}, used, history
 
     J: Jacobian = {}

@@ -158,3 +158,78 @@ def test_fit_face_with_jacobian_end_to_end(tmp_path, monkeypatch):
                     scorer=GeometryScorer(features_from_mock),
                     use_prior=True, neutralize=False, use_jacobian=True)
     assert "缓存复用" in res2.jacobian_note
+
+
+def test_probe_baseline_retries_through_detection_flicker():
+    """检测帧间抖动:基线前两拍检不出,第三拍成功 —— 探针不能一拍放弃。"""
+    class _FlickerGeo:
+        WEIGHTS = GeometryScorer.WEIGHTS
+
+        def __init__(self):
+            self.calls = 0
+            self.last_diff = {}
+
+    class _Ev:
+        def __init__(self, geo):
+            self.geo = geo
+            self._bridge = type("B", (), {"set_morphs":
+                                          staticmethod(lambda *a, **k: {})})()
+            self._cfg = type("C", (), {"atom": "P"})()
+            self.n = 0
+
+        def __call__(self, vals):
+            self.n += 1
+            self.geo.calls += 1
+            # 前两拍检不出脸,之后稳定
+            self.geo.last_diff = ({} if self.geo.calls <= 2
+                                  else {"eye_gap": 0.05})
+            return 0.5
+
+        def bump_epoch(self):
+            pass
+
+    geo = _FlickerGeo()
+    ev = _Ev(geo)
+    J, used, _ = probe_jacobian(ev, geo, {"M": 0.0}, ["M"],
+                                lambda n: (-1.0, 1.0))
+    assert used >= 3            # 重试消耗了评估
+    assert "M" in J or J == {}  # 基线活了之后探针正常走(M 可能斜率为零)
+    assert geo.calls >= 4       # 3 次基线尝试 + 至少 1 次探针
+
+
+def test_fit_face_health_warning_when_detection_mostly_fails(tmp_path):
+    """检不出脸的评估占比过高 → result.health 必须大声说话。"""
+    from PIL import Image
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (10, 10, 10)).save(tpath)
+
+    bridge = _MockFitBridge()
+    calls = {"n": 0}
+
+    def flaky(img):
+        calls["n"] += 1
+        if calls["n"] == 1:                 # 目标照检得出
+            return {"eye_gap": 0.3, "mouth_w": 0.2}
+        return None                         # 渲染 candidate 全检不出(暗光场景)
+
+    geo = GeometryScorer(extractor=flaky)
+    cfg = FitConfig(atom="Person", morph_names=["Nose Size"],
+                    max_iters=6, use_cache=False)
+    res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+                   scorer=geo, use_prior=False, neutralize=False)
+    assert res.health and "检不出人脸" in res.health
+
+
+def test_fit_face_health_when_target_photo_undetectable(tmp_path):
+    """目标照片本身检不出 → 最响的警报,一切分数无效。"""
+    from PIL import Image
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (10, 10, 10)).save(tpath)
+
+    bridge = _MockFitBridge()
+    geo = GeometryScorer(extractor=lambda img: None)
+    cfg = FitConfig(atom="Person", morph_names=["Nose Size"],
+                    max_iters=4, use_cache=False)
+    res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+                   scorer=geo, use_prior=False, neutralize=False)
+    assert "目标照片本身检不出" in res.health

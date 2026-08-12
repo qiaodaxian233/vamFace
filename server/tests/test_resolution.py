@@ -265,3 +265,22 @@ def test_calibrated_mappings_against_owner_inventory():
     assert r.mapping["Lower Lip Thickness"] == "Lips Bottom Full"
     assert r.mapping["Mouth Corners"] == "Mouth Corner Height"
     assert r.unresolved == ["Lips Thickness"]            # 此机故意留死
+
+
+def test_covered_concept_not_nagged_as_missing(tmp_path):
+    """Lips Thickness 由上/下唇厚覆盖 —— 覆盖槽位都解析到了就不该进 missing。"""
+    from PIL import Image
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (127, 127, 127)).save(tpath)
+
+    class _LipsBridge(_AliasBridge):
+        AVAILABLE = ["Lip Upper Thick", "Lips Bottom Full", "Nose Size"]
+
+    bridge = _LipsBridge()
+    cfg = FitConfig(atom="Person", max_iters=6, use_cache=False,
+                    morph_names=["Lips Thickness", "Upper Lip Thickness",
+                                 "Lower Lip Thickness", "Nose Size"])
+    res = fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+                   scorer=_FlatScorer(), use_prior=False, neutralize=False)
+    assert "Lips Thickness" not in res.missing        # 覆盖了,不烦用户
+    assert "Lips Thickness" not in res.best_morphs    # 但也确实没参与拟合

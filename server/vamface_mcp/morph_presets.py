@@ -224,3 +224,9 @@ def resolve_names(wanted: List[str], available: List[str]) -> MorphResolution:
         if actual != name:
             res.renamed[name] = actual
     return res
+
+
+# 概念被其他槽位组合覆盖时,解析不到不算真缺失(不进 missing 提示)
+COVERED_BY: Dict[str, Tuple[str, ...]] = {
+    "Lips Thickness": ("Upper Lip Thickness", "Lower Lip Thickness"),
+}

@@ -37,6 +37,17 @@ def test_character_head_candidates_heuristic():
     assert cand == ["Aiko 6 Head", "Sumiko Head", "Kimi (REN)", "Mei Lin 6 Head"]
 
 
+def test_character_head_candidates_rejects_part_prefixed_features():
+    """用户新装的包把特征滑块混进了 Head 区(真机实锤)——不能进基底扫描,
+    不然 'Face Sag'=1.0 这种都可能被当成角色头采纳。"""
+    rows = [_row(n) for n in
+            ["Eye Bags", "Eye Sag Under", "Eye Socket", "Eyelid Size",
+             "Face Sag", "Nostrils Lower Depth", "fab 2",
+             "Carmen Face", "Tara Face B"]]
+    cand = character_head_candidates(rows)
+    assert cand == ["fab 2", "Carmen Face", "Tara Face B"]
+
+
 # ---------------------------------------------------------------------------
 # basis_search 状态机:清上一个、选冠军、权重微调、落定/放弃
 # ---------------------------------------------------------------------------

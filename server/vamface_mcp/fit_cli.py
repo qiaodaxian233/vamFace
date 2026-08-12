@@ -133,6 +133,8 @@ def main(argv=None) -> int:
         if "NullScorer" in result.warning:
             print("         (score above is a placeholder; install extras: "
                   "pip install -e '.[fit]')", file=sys.stderr)
+    if result.health:
+        print(f"  {result.health}")
     if result.jacobian_note:
         print(f"  本地校准模型: {result.jacobian_note}")
     if result.basis_missing:

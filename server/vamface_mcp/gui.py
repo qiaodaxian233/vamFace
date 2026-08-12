@@ -161,6 +161,8 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, basis, jac, ite
         status += f"\n⚠️ {result.warning}"
         if "NullScorer" in result.warning:
             status += "(分数是占位值,装拟合依赖: pip install -e '.[fit]')"
+    if result.health:
+        status = result.health + "\n" + status  # 健康度警告置顶,别让人白跑
     if result.jacobian_note:
         status += f"\n📐 本地校准模型: {result.jacobian_note}"
     if result.basis_missing:
