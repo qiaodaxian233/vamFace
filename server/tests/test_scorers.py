@@ -140,3 +140,38 @@ def test_build_auto_without_target_falls_to_pixel():
     b = build_scorer_stack("auto", target=None)
     assert b.style == "pixel"
     assert b.warning
+
+
+# ---------------------------------------------------------------------------
+# v0.7.1:onnxruntime 后端优选(打分器上 GPU)
+# ---------------------------------------------------------------------------
+
+def test_preferred_providers_gpu_first(monkeypatch):
+    import sys, types
+    from vamface_mcp import scorers
+
+    fake = types.ModuleType("onnxruntime")
+    fake.get_available_providers = lambda: [
+        "CPUExecutionProvider", "DmlExecutionProvider"]
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+    provs = scorers.preferred_providers()
+    assert provs[0] == "DmlExecutionProvider"      # GPU 排前
+    assert provs[-1] == "CPUExecutionProvider"     # CPU 永远兜底
+
+
+def test_preferred_providers_cpu_only(monkeypatch):
+    import sys, types
+    from vamface_mcp import scorers
+
+    fake = types.ModuleType("onnxruntime")
+    fake.get_available_providers = lambda: ["CPUExecutionProvider"]
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+    assert scorers.preferred_providers() == ["CPUExecutionProvider"]
+
+
+def test_preferred_providers_no_ort(monkeypatch):
+    import sys
+    from vamface_mcp import scorers
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
+    assert scorers.preferred_providers() == []

@@ -190,10 +190,7 @@ class _InsightFeatureExtractor:
     """insightface → 特征向量(真人脸)。优先 106 点 landmark,退化用 5 点 kps。"""
 
     def __init__(self) -> None:
-        from insightface.app import FaceAnalysis  # 懒加载、重依赖
-
-        self.app = FaceAnalysis(name="buffalo_l")
-        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        self.app, self.provider = _build_face_analysis()
 
     def __call__(self, img: np.ndarray) -> Optional[FeatureDict]:
         faces = self.app.get(img[:, :, ::-1])  # insightface 吃 BGR
@@ -228,6 +225,53 @@ class _InsightFeatureExtractor:
             except Exception:
                 pass
         return feat
+
+
+# ---------------------------------------------------------------------------
+# onnxruntime 后端优选(v0.7.1)—— 打分器上 GPU
+# ---------------------------------------------------------------------------
+# 用户实感:CPU 吃满。ArcFace + 人脸检测每次评估都在 onnxruntime 上全力
+# 烧核,还和 VaM 抢核心。装了 onnxruntime-directml(Windows 任意 DX12
+# 显卡,零 CUDA 依赖)或 onnxruntime-gpu(NVIDIA+CUDA)后,这里自动
+# 优选 GPU provider;什么都没装就照旧 CPU,不炸(教训5)。
+
+_PROVIDER_SHORT = {
+    "CUDAExecutionProvider": "CUDA",
+    "DmlExecutionProvider": "DirectML",
+    "ROCMExecutionProvider": "ROCm",
+    "CoreMLExecutionProvider": "CoreML",
+    "CPUExecutionProvider": "CPU",
+}
+
+
+def preferred_providers() -> List[str]:
+    """按 GPU 优先排出可用的 onnxruntime provider;CPU 永远垫底兜底。"""
+    try:
+        import onnxruntime as ort  # 懒加载
+        avail = set(ort.get_available_providers())
+    except Exception:
+        return []
+    order = ["CUDAExecutionProvider", "DmlExecutionProvider",
+             "ROCMExecutionProvider", "CoreMLExecutionProvider"]
+    out = [p for p in order if p in avail]
+    out.append("CPUExecutionProvider")
+    return out
+
+
+def _build_face_analysis(det: int = 512):
+    """建 FaceAnalysis:GPU provider 优先,老版 insightface 不认 providers
+    参数就退回默认构造。返回 (app, provider 短名)。"""
+    from insightface.app import FaceAnalysis  # 懒加载、重依赖
+
+    provs = preferred_providers()
+    prov_name = _PROVIDER_SHORT.get(provs[0], provs[0]) if provs else "CPU"
+    try:
+        app = FaceAnalysis(name="buffalo_l", providers=provs or None)
+    except TypeError:  # 老版 insightface 没有 providers 形参
+        app = FaceAnalysis(name="buffalo_l")
+        prov_name = "CPU"
+    app.prepare(ctx_id=0, det_size=(det, det))
+    return app, prov_name
 
 
 class GeometryScorer(Scorer):
@@ -337,10 +381,8 @@ class ArcFaceScorer(Scorer):
     name = "arcface"
 
     def __init__(self) -> None:
-        from insightface.app import FaceAnalysis  # 懒加载、重依赖
-
-        self.app = FaceAnalysis(name="buffalo_l")
-        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        self.app, self.provider = _build_face_analysis()
+        self.name = f"arcface@{self.provider}"  # 打分标签直接暴露后端
         self._target_cache: Optional[np.ndarray] = None
 
     def _embed(self, img: np.ndarray) -> Optional[np.ndarray]:
