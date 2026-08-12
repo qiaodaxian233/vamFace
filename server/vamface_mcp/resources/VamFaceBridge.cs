@@ -40,7 +40,7 @@ namespace VamFace
 {
     public class VamFaceBridge : MVRScript
     {
-        private const string VERSION = "0.5.5";
+        private const string VERSION = "0.5.6";
         // 与 server 端 vamface_mcp.PROTOCOL_VERSION 对账,改协议时两边同步 +1。
         private const int PROTOCOL = 1;
         private const int DEFAULT_PORT = 8787;

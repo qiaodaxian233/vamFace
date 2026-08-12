@@ -363,6 +363,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
     # 硬试(missing 仍由 set_morphs 回执兜底收集)—— 猜测值不当阻塞器。
     canonical_names = list(cfg.morph_names)
     resolution = None
+    real_bounds: Dict[str, Tuple[float, float]] = {}
     try:
         reply = bridge.list_morphs(cfg.atom, limit=1_000_000)
         rows = reply.get("morphs") or []
@@ -371,6 +372,11 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
         if available and len(available) >= total:
             from .morph_presets import resolve_names
             resolution = resolve_names(canonical_names, available)
+            for r in rows:
+                try:
+                    real_bounds[str(r["name"])] = (float(r["min"]), float(r["max"]))
+                except (KeyError, TypeError, ValueError):
+                    pass  # 行缺 min/max 就不收口这一个,不因脏数据放弃全部
     except Exception:
         log.warning("别名解析跳过(list_morphs 不可用),按原名硬试", exc_info=True)
 
@@ -385,6 +391,21 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             bounds={to_act(k): v for k, v in cfg.bounds.items()},
             seed=({to_act(k): v for k, v in cfg.seed.items()}
                   if cfg.seed else cfg.seed))
+    # 搜索边界 ∩ 真机 morph 的 min/max:超出插件会 clamp 的区域是平坦地形,
+    # 优化器在里面走一步就是白烧一次评估。交集为空(配置错)时用真机范围。
+    if real_bounds:
+        from dataclasses import replace as _dc_replace
+        tightened = dict(cfg.bounds)
+        for n in cfg.morph_names:
+            rb = real_bounds.get(n)
+            if rb is None:
+                continue
+            lo, hi = _bounds_for(cfg, n)
+            tlo, thi = max(lo, rb[0]), min(hi, rb[1])
+            if tlo >= thi:
+                tlo, thi = rb
+            tightened[n] = (tlo, thi)
+        cfg = _dc_replace(cfg, bounds=tightened)
     # hints 按实际可用性过滤/改名(修真机第三跑的 bug:提示推荐不存在的滑块)
     if resolution is not None:
         geo_h = find_geometry_scorer(scorer)

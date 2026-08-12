@@ -193,3 +193,75 @@ def test_fit_face_without_list_morphs_still_works(tmp_path):
                    scorer=_FlatScorer(), use_prior=False, neutralize=False)
     assert res.renamed == {}
     assert "Bogus Thing" in res.missing  # 回执兜底路径仍然工作
+
+
+# ---------------------------------------------------------------------------
+# v0.5.6:真机 min/max 收口搜索边界 + 按用户真实清单校准的关键映射
+# ---------------------------------------------------------------------------
+
+class _BoundedBridge(_AliasBridge):
+    """'Nose Size' 真机范围只有 [0, 0.3] 的假 VaM,记录每次写入值。"""
+
+    AVAILABLE = ["Nose Size"]
+
+    def __init__(self):
+        super().__init__()
+        self.seen_values = []
+
+    def list_morphs(self, atom, filter="", region="", limit=200):
+        rows = [{"name": "Nose Size", "uid": "fake/Nose Size", "region": "face",
+                 "value": 0.0, "min": "0", "max": "0.3"}]  # 字符串:导出 JSON 同款
+        return {"count": 1, "total": 1, "morphs": rows}
+
+    def set_morphs(self, atom, values, clamp=True):
+        if "Nose Size" in values:
+            self.seen_values.append(float(values["Nose Size"]))
+        return super().set_morphs(atom, values, clamp)
+
+
+def test_fit_face_tightens_bounds_to_real_range(tmp_path):
+    """搜索边界 ∩ 真机 min/max:优化器不再把评估烧在会被 clamp 的区域。"""
+    from PIL import Image
+    tpath = tmp_path / "t.png"
+    Image.new("RGB", (8, 8), (127, 127, 127)).save(tpath)
+
+    bridge = _BoundedBridge()
+    cfg = FitConfig(atom="Person", max_iters=10, use_cache=False,
+                    morph_names=["Nose Size"])  # 默认边界本来是 (-0.6, 0.8)
+    fit_face(bridge, str(tpath), cfg, optimizer="greedy",
+             scorer=_FlatScorer(), use_prior=False, neutralize=False)
+    assert bridge.seen_values, "至少要有一次评估"
+    assert all(0.0 - 1e-9 <= v <= 0.3 + 1e-9 for v in bridge.seen_values), \
+        f"越界写入: {bridge.seen_values}"
+
+
+def test_calibrated_mappings_against_owner_inventory():
+    """2026-08-12 真机清单校准的关键映射(名单变了这条会红,提醒重校准)。"""
+    inventory = [  # 用户 1190 个 morph 里与精选槽位相关的子集
+        "Cheek Bones Size", "Cheek Bones Width", "ChinOut", "Cranium Size",
+        "Eye Fold", "Eyelids Heavy", "Eyes Angle", "EyesNoseWidth",
+        "Face Height 2", "Face Height", "Head Width", "Head Scale",
+        "Jaw Corner Width", "Mouth Corner Width", "LIps Top Width",
+        "Lips Bottom Full", "Mouth Corner Height", "Lip Upper Thick",
+        "Nose Size", "Mouth Width", "Chin Depth",
+    ]
+    r = resolve_names(
+        ["Head Big", "Head Scale", "Face Long", "Jaw Width", "Chin Forward",
+         "Chin Depth", "Eyes Width Spacing", "Eyelids Height", "Eye Fold Depth",
+         "Lips Thickness", "Lips Width", "Upper Lip Thickness",
+         "Lower Lip Thickness", "Mouth Corners"],
+        inventory)
+    assert r.mapping["Head Scale"] == "Head Scale"       # 规范名不被别名抢走
+    assert r.mapping["Head Big"] == "Head Width"
+    assert r.mapping["Chin Depth"] == "Chin Depth"
+    assert r.mapping["Chin Forward"] == "ChinOut"
+    assert r.mapping["Face Long"] == "Face Height 2"     # 双向优先于单向
+    assert r.mapping["Eyes Width Spacing"] == "EyesNoseWidth"
+    assert r.mapping["Eyelids Height"] == "Eyelids Heavy"
+    assert r.mapping["Eye Fold Depth"] == "Eye Fold"
+    assert r.mapping["Jaw Width"] == "Jaw Corner Width"
+    assert r.mapping["Lips Width"] == "Mouth Corner Width"
+    assert r.mapping["Upper Lip Thickness"] == "Lip Upper Thick"
+    assert r.mapping["Lower Lip Thickness"] == "Lips Bottom Full"
+    assert r.mapping["Mouth Corners"] == "Mouth Corner Height"
+    assert r.unresolved == ["Lips Thickness"]            # 此机故意留死

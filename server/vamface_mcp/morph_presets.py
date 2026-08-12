@@ -116,31 +116,65 @@ def norm_name(name: str) -> str:
 
 # 概念槽位(= FACE_MORPH_GROUPS 里的规范名)→ 候选别名(按优先级)
 # 规范名自身永远是第一候选,不用重复写进表里。
+#
+# 2026-08-12 已按仓库主人导出的真机清单(1190 个 morph)校准:
+# 标 [真机] 的候选是在他机器上实际命中的名字;前面的泛型候选留给其他
+# morph 包。标 [近义] 的是语义近似兜底(找不到同义杠杆时用最接近的),
+# 语义有漂移的在行内注明。"Lips Thickness" 在他机器上**故意留死**:
+# 上/下唇厚各有独立杠杆,总厚度维度纯冗余,不值得占一维。
 MORPH_ALIASES: Dict[str, List[str]] = {
-    "Head Big": ["Head Size", "Head Large", "Head Big Small", "Head Scale Big"],
-    "Cranium Shape": ["Cranium Size", "Skull Shape", "Head Shape", "Cranium"],
-    "Face Long": ["Face Length", "Face Elongate", "Face Tall", "Face Long Short"],
-    "Jaw Width": ["Jaws Width", "Jaw Wide", "Jaw Width Wide"],
+    "Head Big": ["Head Size", "Head Large", "Head Big Small", "Head Scale Big",
+                 # [近义] 语义从"整体大"漂到"头宽"——Head Scale 概念已占走
+                 # 真正的整体缩放,宽度是此外唯一没被覆盖的颅型杠杆
+                 "Head Width"],
+    "Cranium Shape": ["Cranium Size",  # [真机]
+                      "Skull Shape", "Head Shape", "Cranium"],
+    "Face Long": ["Face Length",
+                  "Face Height 2",  # [真机] 双向(-0.48..1),优先于单向的 Face Height
+                  "Face Height",    # [真机] 0..1 只能拉长不能缩短
+                  "Face Elongate", "Face Tall", "Face Long Short"],
+    "Jaw Width": ["Jaws Width", "Jaw Wide", "Jaw Width Wide",
+                  "Jaw Corner Width"],  # [真机] 0..1,颌角间宽,最贴切的宽度杠杆
     "Chin Forward": ["Chin Front", "Chin Forward Back", "Chin Protrude",
-                     "Chin Depth Forward"],
-    "Cheekbones Size": ["Cheek Bones Size", "Cheekbone Size", "CheekBones Size",
-                        "Cheeks Bone Size"],
-    "Cheekbones Width": ["Cheek Bones Width", "Cheekbone Width", "CheekBones Width"],
+                     "Chin Depth Forward",
+                     "Chin Out"],  # [真机] 命中 "ChinOut"(归一化吃掉空格差异)
+    "Cheekbones Size": ["Cheek Bones Size",  # [真机]
+                        "Cheekbone Size", "CheekBones Size", "Cheeks Bone Size"],
+    "Cheekbones Width": ["Cheek Bones Width",  # [真机]
+                         "Cheekbone Width", "CheekBones Width"],
     "Eyes Width Spacing": ["Eyes Spacing Width", "Eye Spacing", "Eyes Spacing",
-                           "Eyes Distance", "Eye Distance", "Eyes Width Apart"],
-    "Eyes Slant": ["Eye Slant", "Eyes Angle", "Eyes Slant Inner", "Eyes Tilt"],
+                           "Eyes Distance", "Eye Distance", "Eyes Width Apart",
+                           # [真机/近义] 眼鼻整体加宽,eye_gap 的最强可用杠杆
+                           "Eyes Nose Width",
+                           # [真机/近义] 只动内眼角,间距效果较弱
+                           "Eyes Inner Corner Width"],
+    "Eyes Slant": ["Eyes Angle",  # [真机]
+                   "Eye Slant", "Eyes Slant Inner", "Eyes Tilt"],
     "Eyelids Height": ["Eyelid Height", "Eyes Lid Height", "Eyelids Top Height",
-                       "Upper Eyelids Height"],
-    "Eye Fold Depth": ["Eyes Fold Depth", "Eyelid Fold Depth", "Eye Folds",
+                       "Upper Eyelids Height",
+                       # [真机/近义] ↑=眼皮更重=眼更闭,与本概念方向一致
+                       "Eyelids Heavy",
+                       "Eyelids Height Inner"],  # [真机] 只动内侧,兜底
+    "Eye Fold Depth": ["Eye Fold",  # [真机] 0..1
+                       "Eyes Fold Depth", "Eyelid Fold Depth", "Eye Folds",
                        "Eyelids Fold"],
-    "Lips Thickness": ["Lip Thickness", "Lips Thick", "Lips Thin Thick"],
-    "Lips Width": ["Lip Width", "Lips Wide"],
-    "Upper Lip Thickness": ["Lip Upper Thickness", "Upper Lip Thick",
-                            "Lip Top Thickness", "Lips Upper Thickness"],
-    "Lower Lip Thickness": ["Lip Lower Thickness", "Lower Lip Thick",
-                            "Lip Bottom Thickness", "Lips Lower Thickness"],
-    "Mouth Corners": ["Mouth Corner Height", "Mouth Corners Up Down",
-                      "Lip Corners", "Mouth Corner Up-Down"],
+    "Lips Thickness": ["Lip Thickness", "Lips Thick", "Lips Thin Thick",
+                       "Lips Full", "Lips Fullness"],
+    "Lips Width": ["Lip Width", "Lips Wide",
+                   "Mouth Corner Width",  # [真机/近义] 嘴角间宽 ≈ 唇宽
+                   "Lips Top Width"],     # [真机] 命中 "LIps Top Width"(大小写归一化)
+    "Upper Lip Thickness": ["Lip Upper Thickness",
+                            "Lip Upper Thick",  # [真机] 注意词序:归一化不吞词序
+                            "Upper Lip Thick", "Lip Top Thickness",
+                            "Lips Upper Thickness",
+                            "Lips Top Full"],   # [真机] 兜底
+    "Lower Lip Thickness": ["Lip Lower Thickness",
+                            "Lips Bottom Full",  # [真机] -1..1 双向
+                            "Lower Lip Thick", "Lip Bottom Thickness",
+                            "Lips Lower Thickness",
+                            "Lip Lower Size"],   # [真机] 兜底
+    "Mouth Corners": ["Mouth Corner Height",  # [真机]
+                      "Mouth Corners Up Down", "Lip Corners", "Mouth Corner Up-Down"],
 }
 
 
