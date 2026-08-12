@@ -48,6 +48,8 @@ def main(argv=None) -> int:
                         help="禁用几何先验种子(默认开; 需要打分器里有几何项)")
     parser.add_argument("--no-neutralize", action="store_true",
                         help="拟合前不清零表情类 morph(默认清零防作弊解)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="禁用截图缓存(默认开: 重访相同 morph 向量直接复用分数)")
     parser.add_argument("--iters", type=int, default=60, help="evaluation budget")
     parser.add_argument("--groups", nargs="*", choices=sorted(FACE_MORPH_GROUPS),
                         help="morph regions to optimize (default: all)")
@@ -69,8 +71,10 @@ def main(argv=None) -> int:
 
     bridge = BridgeClient(args.host, args.port)
     try:
-        info = bridge.ping()
+        info = bridge.handshake()
         print(f"connected: VamFaceBridge v{info.get('version')} on {args.host}:{args.port}")
+        if info.get("compat_warning"):
+            print(f"WARNING: {info['compat_warning']}", file=sys.stderr)
     except BridgeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -81,6 +85,7 @@ def main(argv=None) -> int:
         bounds={n: default_bounds(n) for n in names},
         max_iters=args.iters,
         screenshot_width=args.width,
+        use_cache=not args.no_cache,
     )
 
     print(f"fitting over {len(names)} morphs, optimizer={args.optimizer}, "
@@ -99,7 +104,7 @@ def main(argv=None) -> int:
     elapsed = time.time() - t0
     print(f"done in {elapsed:.0f}s — best score: {result.best_score:.4f} "
           f"(style={result.style}, scorer={result.scorer_name}, "
-          f"stages={result.stage_count})")
+          f"stages={result.stage_count}, cache hits={result.cache_hits})")
     if result.neutralized:
         print(f"  已清零表情 morph: {', '.join(result.neutralized)}")
     if result.prior_seed:

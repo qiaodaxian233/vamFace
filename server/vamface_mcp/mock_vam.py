@@ -33,11 +33,12 @@ import socket
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import PROTOCOL_VERSION
 from .morph_presets import FACE_MORPH_GROUPS
 
 log = logging.getLogger("vamface.mock")
 
-MOCK_VERSION = "mock-0.3"
+MOCK_VERSION = "mock-0.5"
 
 # morph 名 → (分组, min, max)。44 个精选身份 morph + 若干表情 morph
 # (表情不在精选子集里,专门用来测 v0.4 的表情归一化)。范围沿 VaM 惯例。
@@ -367,7 +368,8 @@ class MockVamServer:
     # -- 命令实现(与 protocol.md 表一一对应)----------------------------------
 
     def _cmd_ping(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"version": MOCK_VERSION, "app": "MockVaM"}
+        return {"version": MOCK_VERSION, "app": "MockVaM",
+                "protocol": PROTOCOL_VERSION}
 
     def _cmd_list_atoms(self, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"atoms": [{"uid": "Person", "type": "Person"},

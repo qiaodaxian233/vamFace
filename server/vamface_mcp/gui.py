@@ -25,11 +25,14 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from . import __version__
 from .bridge_client import BridgeClient, BridgeError
-from .fitting import FitConfig, fit_face
+from .fitting import FitConfig, decode_png_b64, fit_face
 from .morph_presets import FACE_MORPH_GROUPS, default_bounds
 from .skin import apply_skin_color, sample_skin_tone
-from .vap import write_vap
+from .updater import (check_latest, install_plugin, load_config,
+                      plugin_source_version, save_config)
+from .vap import read_vap, write_vap
 
 OUT_DIR = Path("./out").resolve()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,10 +86,11 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
 
     bridge = _get_bridge(host, port)
     try:
-        info = bridge.ping()
+        info = bridge.handshake()
     except BridgeError as e:
         yield None, None, f"❌ 连不上桥接插件: {e}", None, None
         return
+    compat = f"\n⚠️ {info['compat_warning']}" if info.get("compat_warning") else ""
 
     names = [n for g in (groups or FACE_MORPH_GROUPS.keys())
              for n in FACE_MORPH_GROUPS.get(g, [])]
@@ -135,7 +139,8 @@ def run_fit(host, port, photo_path, atom, optimizer, style, c2f, iters, groups, 
     vap_path = OUT_DIR / f"fit_{int(time.time())}.vap"
     write_vap(vap_path, result.best_morphs)
     status = (f"✅ 完成 · 最优分 {result.best_score:.4f} · "
-              f"打分 {result.style}/{result.scorer_name} · 已存 {vap_path.name}")
+              f"打分 {result.style}/{result.scorer_name} · "
+              f"缓存命中 {result.cache_hits} · 已存 {vap_path.name}") + compat
     if result.hints:
         status += "\n" + "\n".join(f"💡 {h}" for h in result.hints[:5])
     if result.warning:
@@ -220,10 +225,23 @@ def do_apply_tone(host, port, atom, photo_path, selected_params):
 
 def do_ping(host, port):
     try:
-        info = _get_bridge(host, port).ping()
-        return f"✅ VamFaceBridge v{info.get('version')} @ {host}:{int(port)}"
+        info = _get_bridge(host, port).handshake()
+        msg = f"✅ VamFaceBridge v{info.get('version')} @ {host}:{int(port)}"
+        if info.get("compat_warning"):
+            msg += f"\n⚠️ {info['compat_warning']}"
+        return msg
     except BridgeError as e:
         return f"❌ {e}"
+
+
+def do_check_update():
+    r = check_latest()
+    if r["error"]:
+        return f"server v{r['installed']} · ⚠️ {r['error']}"
+    if r["update_available"]:
+        return (f"server v{r['installed']} → GitHub 最新 v{r['latest']} · "
+                f"更新: 仓库目录里 `git pull` 后重启;插件用下方连接调试页一键更新")
+    return f"server v{r['installed']} · ✅ 已是最新(GitHub: v{r['latest']})"
 
 
 def do_list_atoms(host, port):
@@ -245,6 +263,106 @@ def do_inspect(host, port, atom, storable):
         return f"❌ {e}"
 
 
+
+# ---------------------------------------------------------------------------
+# Tab: 手动微调(v0.5)
+# ---------------------------------------------------------------------------
+
+TUNE_NAMES: List[str] = [n for g in sorted(FACE_MORPH_GROUPS)
+                         for n in FACE_MORPH_GROUPS[g]]
+
+
+def tune_load(host, port, atom):
+    """读取 VaM 当前值 → 刷新全部滑块。缺的 morph 显示 0 并在状态里点名。"""
+    import gradio as gr
+    try:
+        vals = _get_bridge(host, port).get_morphs(atom, changed_only=False)
+    except BridgeError as e:
+        return [gr.update() for _ in TUNE_NAMES] + [f"❌ {e}"]
+    missing = [n for n in TUNE_NAMES if n not in vals]
+    status = f"✅ 已读取 {len(TUNE_NAMES) - len(missing)}/{len(TUNE_NAMES)} 个 morph"
+    if missing:
+        status += f" · 目标 VaM 没有: {', '.join(missing[:8])}" + \
+                  (" …" if len(missing) > 8 else "")
+    return [gr.update(value=float(vals.get(n, 0.0))) for n in TUNE_NAMES] + [status]
+
+
+def tune_set_one(name, host, port, atom, value):
+    try:
+        r = _get_bridge(host, port).set_morphs(atom, {name: float(value)})
+        if r.get("missing"):
+            return f"⚠️ 目标 VaM 没有这个 morph: {name}"
+        return f"✅ {name} = {float(value):.3f}"
+    except BridgeError as e:
+        return f"❌ {e}"
+
+
+def tune_zero(host, port, atom):
+    import gradio as gr
+    try:
+        _get_bridge(host, port).set_morphs(atom, {n: 0.0 for n in TUNE_NAMES})
+    except BridgeError as e:
+        return [gr.update() for _ in TUNE_NAMES] + [f"❌ {e}"]
+    return [gr.update(value=0.0) for n in TUNE_NAMES] + ["✅ 精选 morph 已全部归零"]
+
+
+def tune_shot(host, port, atom):
+    try:
+        b = _get_bridge(host, port)
+        try:
+            b.focus_head(atom)
+        except BridgeError:
+            pass  # 聚焦失败不挡截图
+        shot = b.screenshot(max_width=640)
+        return decode_png_b64(shot["png_base64"]), "✅ 已刷新"
+    except BridgeError as e:
+        return None, f"❌ {e}"
+
+
+def tune_export(*slider_values):
+    vals = {n: float(v) for n, v in zip(TUNE_NAMES, slider_values)
+            if abs(float(v)) > 1e-6}
+    path = OUT_DIR / f"tune_{int(time.time())}.vap"
+    write_vap(path, vals)
+    return str(path), f"✅ 已导出 {path.name}({len(vals)} 个非零 morph)"
+
+
+def tune_apply_vap(host, port, atom, vap_file):
+    import gradio as gr
+    if not vap_file:
+        return [gr.update() for _ in TUNE_NAMES] + ["请先选择 .vap 文件"]
+    try:
+        morphs = read_vap(vap_file)
+        r = _get_bridge(host, port).set_morphs(atom, morphs)
+    except (BridgeError, OSError, ValueError, KeyError) as e:
+        return [gr.update() for _ in TUNE_NAMES] + [f"❌ {e}"]
+    status = f"✅ 已应用 {r.get('applied', 0)} 个 morph"
+    if r.get("missing"):
+        status += f" · 缺失 {len(r['missing'])} 个"
+    return [gr.update(value=float(morphs.get(n, 0.0)))
+            for n in TUNE_NAMES] + [status]
+
+
+# ---------------------------------------------------------------------------
+# 插件更新(v0.5)
+# ---------------------------------------------------------------------------
+
+def do_install_plugin(vam_dir):
+    if not vam_dir or not vam_dir.strip():
+        return "请填 VaM 安装目录(含 VaM.exe 的那个)"
+    r = install_plugin(vam_dir.strip())
+    if not r["ok"]:
+        return f"❌ {r['error']}"
+    save_config(vam_dir=vam_dir.strip())
+    lines = [f"✅ 插件已写入 {r['dest']}(v{plugin_source_version()})"]
+    if r["backup"]:
+        lines.append(f"旧文件备份: {r['backup']}")
+    if r["note"]:
+        lines.append(r["note"])
+    lines.append("最后一步得人做:VaM → Session Plugins → 该插件点 Reload。")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -253,14 +371,16 @@ def build_app():
     import gradio as gr
 
     with gr.Blocks(title="vamFace") as demo:
-        gr.Markdown("# vamFace · 照片 → VaM 面部\n"
+        gr.Markdown(f"# vamFace v{__version__} · 照片 → VaM 面部\n"
                     "需要 VaM 运行中且已加载 VamFaceBridge session 插件。")
         with gr.Row():
             host = gr.Textbox(value="127.0.0.1", label="Host", scale=2)
             port = gr.Number(value=8787, label="Port", precision=0, scale=1)
             ping_btn = gr.Button("测试连接", scale=1)
+            upd_btn = gr.Button("检查更新", scale=1)
             ping_out = gr.Markdown("")
         ping_btn.click(do_ping, [host, port], ping_out)
+        upd_btn.click(do_check_update, [], ping_out)
 
         with gr.Tab("照片拟合"):
             with gr.Row():
@@ -283,6 +403,48 @@ def build_app():
             fit_vap = gr.File(label="导出的 .vap 预设")
             fit_btn.click(run_fit, [host, port, photo, atom, optimizer, style, c2f, iters, groups, width],
                           [photo, current, fit_status, fit_plot, fit_vap])
+
+        with gr.Tab("手动微调"):
+            gr.Markdown("拟合收尾用:拖滑块**实时**写进 VaM(松手生效),满意了导出 .vap。"
+                        "先点\"读取当前值\"和 VaM 对齐,免得滑块骗你。")
+            with gr.Row():
+                tune_atom = gr.Textbox(value="Person", label="Person 原子", scale=1)
+                tune_load_btn = gr.Button("读取当前值", scale=1)
+                tune_zero_btn = gr.Button("全部归零", scale=1)
+                tune_shot_btn = gr.Button("刷新截图", scale=1)
+            tune_status = gr.Markdown("")
+            with gr.Row():
+                with gr.Column(scale=3):
+                    tune_sliders = []
+                    for gname in sorted(FACE_MORPH_GROUPS):
+                        with gr.Accordion(gname, open=(gname in ("skull", "jaw"))):
+                            for mname in FACE_MORPH_GROUPS[gname]:
+                                lo, hi = default_bounds(mname)
+                                sl = gr.Slider(lo, hi, value=0.0, step=0.01,
+                                               label=mname)
+                                sl.release(
+                                    (lambda n: lambda host, port, atom, v:
+                                        tune_set_one(n, host, port, atom, v))(mname),
+                                    [host, port, tune_atom, sl], tune_status)
+                                tune_sliders.append(sl)
+                with gr.Column(scale=2):
+                    tune_img = gr.Image(label="VaM 当前渲染", height=420)
+                    tune_export_btn = gr.Button("导出为 .vap", variant="primary")
+                    tune_vap_out = gr.File(label="导出的 .vap")
+                    tune_vap_in = gr.File(label="载入 .vap(应用到 VaM+滑块)",
+                                          type="filepath", file_types=[".vap"])
+                    tune_apply_btn = gr.Button("应用该 .vap")
+            tune_load_btn.click(tune_load, [host, port, tune_atom],
+                                tune_sliders + [tune_status])
+            tune_zero_btn.click(tune_zero, [host, port, tune_atom],
+                                tune_sliders + [tune_status])
+            tune_shot_btn.click(tune_shot, [host, port, tune_atom],
+                                [tune_img, tune_status])
+            tune_export_btn.click(tune_export, tune_sliders,
+                                  [tune_vap_out, tune_status])
+            tune_apply_btn.click(tune_apply_vap,
+                                 [host, port, tune_atom, tune_vap_in],
+                                 tune_sliders + [tune_status])
 
         with gr.Tab("皮肤 L0"):
             gr.Markdown("Level 0 = 采样照片肤色 → 选最接近的皮肤 → 微调颜色参数。"
@@ -328,6 +490,17 @@ def build_app():
                 dbg_btn = gr.Button("查看")
             dbg_out = gr.Code(label="结果", language="json")
             dbg_btn.click(do_inspect, [host, port, dbg_atom, dbg_storable], dbg_out)
+
+            gr.Markdown("### 更新插件到 VaM\n"
+                        f"把随包发行的 VamFaceBridge.cs(v{plugin_source_version() or '?'})"
+                        "写进 VaM 目录,旧文件自动备份。装完在 VaM 里 reload 一次。")
+            with gr.Row():
+                vam_dir = gr.Textbox(value=load_config().get("vam_dir", ""),
+                                     label="VaM 安装目录", scale=3,
+                                     placeholder=r"例: D:\\VaM")
+                inst_btn = gr.Button("更新插件", variant="primary", scale=1)
+            inst_out = gr.Markdown("")
+            inst_btn.click(do_install_plugin, [vam_dir], inst_out)
 
     return demo
 

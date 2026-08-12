@@ -4,11 +4,11 @@ An **MCP server + VaM plugin** that automates face creation in
 **Virt-A-Mate 1.22.0.3**: point it at a face photo and it drives the
 in-game morph sliders until the rendered face matches.
 
-> ⚠️ Status: **v0.4**. The offline layer (`.vap` read/write) is tested; the
-> whole pipeline (bridge client ↔ protocol ↔ fitting ↔ export) is now
+> ⚠️ Status: **v0.5**. The offline layer (`.vap` read/write) is tested; the
+> whole pipeline (bridge client ↔ protocol ↔ fitting ↔ export) is
 > exercised end-to-end against the bundled **mock VaM** (`vamface-mock`,
-> 27 tests). What still needs a live VaM 1.22 pass is only the plugin-side
-> API names marked `TODO(verify)` — see `docs/protocol.md`.
+> 59 tests, CI on 3.10/3.12). What still needs a live VaM 1.22 pass is only
+> the plugin-side API names marked `TODO(verify)` — see `docs/protocol.md`.
 
 ## How it works
 
@@ -115,6 +115,22 @@ Four things run before/around the optimizer, all on by default:
 - **Coarse-to-fine** — `--coarse-to-fine` fits contour groups
   (skull/jaw/cheeks) first, freezes them, then features
   (eyes/nose/mouth/ears); budget split by dimensionality.
+
+## v0.5 quality-of-life
+
+- **Protocol handshake** — `ping` now reports a protocol version; server,
+  CLI and GUI warn (never block) when plugin and server drift apart.
+- **Screenshot cache** — exact revisits of a morph vector reuse the score
+  instead of a full set-morphs/screenshot round-trip (on by default,
+  `--no-cache` to disable; hit count reported in results).
+- **Manual tune tab** (GUI) — sliders for the 44 curated morphs, written
+  into VaM live on release; load current values, zero all, refresh
+  screenshot, import/export `.vap`. For hand-finishing the last few percent
+  after a fit.
+- **Updater** — a "检查更新" button compares the installed version against
+  GitHub main; the 连接调试 tab can write the bundled plugin `.cs` straight
+  into your VaM folder (old file backed up, path remembered in
+  `~/.vamface/config.json`). Reload the session plugin in VaM afterwards.
 
 ## Mock VaM (test without VaM)
 

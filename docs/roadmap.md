@@ -21,7 +21,21 @@
 - [x] *(shipped in v0.4)* Coarse-to-fine staged fitting (contour groups →
       freeze → feature groups), budget split by dimensionality.
 - [ ] Multi-view scoring (front + 3/4) to avoid overfitting to one angle.
-- [ ] Cache screenshots keyed by morph vector hash to skip re-renders.
+- [x] *(shipped in v0.5)* Cache screenshots keyed by (epoch, quantized
+      morph vector) to skip re-renders; epoch bumps on out-of-band
+      `set_morphs` (stage freeze) so incremental semantics stay correct.
+
+## v0.5 (shipped) — handshake / cache / manual tune / updater
+- [x] Protocol-version handshake in `ping` (warn-not-block on mismatch or
+      pre-0.5 plugin); versions single-sourced (`__init__.__version__` →
+      pyproject dynamic; C# `VERSION`/`PROTOCOL` checked by tests).
+- [x] Screenshot cache (exact-revisit dedup, epoch-invalidated).
+- [x] GUI "手动微调" tab: live sliders over the curated subset,
+      load/zero/screenshot/`.vap` import-export.
+- [x] Updater: GitHub version check + one-click plugin install into the
+      VaM folder (backup + persisted path); plugin `.cs` now ships inside
+      the wheel (`vamface_mcp/resources/`, byte-equality with `plugin/`
+      enforced by a test).
 
 ## v0.4 (shipped) — fitting-quality four-pack + CI
 - [x] Geometry-prior seeding: one probe evaluation → feature deltas →

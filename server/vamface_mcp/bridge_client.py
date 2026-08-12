@@ -23,6 +23,23 @@ class BridgeError(RuntimeError):
     """Raised when the bridge returns ok=false or the connection breaks."""
 
 
+def check_handshake(ping_data: Dict[str, Any]) -> Optional[str]:
+    """检查 ping 返回的协议版本,不匹配/缺失时返回人话警告,匹配返回 None。"""
+    from . import PROTOCOL_VERSION, __version__
+
+    proto = ping_data.get("protocol")
+    ver = ping_data.get("version", "?")
+    if proto is None:
+        return (f"插件 v{ver} 没报协议版本(0.5 之前的版本)——server 是 "
+                f"v{__version__}/协议{PROTOCOL_VERSION}。建议更新插件:GUI 连接调试页"
+                f"一键更新,或手动复制 plugin/VamFaceBridge.cs 后在 VaM 里 reload。")
+    if int(proto) != PROTOCOL_VERSION:
+        return (f"协议版本不匹配:插件 v{ver}/协议{proto},server v{__version__}/"
+                f"协议{PROTOCOL_VERSION}。两边有一边旧了,部分命令可能对不上,"
+                f"请把插件和 server 更到同一版本。")
+    return None
+
+
 class BridgeClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 8787,
                  timeout: float = 30.0) -> None:
@@ -102,6 +119,19 @@ class BridgeClient:
 
     def ping(self) -> Dict[str, Any]:
         return self.call("ping")
+
+    def handshake(self) -> Dict[str, Any]:
+        """ping + 协议版本对账。返回 ping 的 data,可能追加 compat_warning。
+
+        对不上**只警告不阻塞**(教训5:握手失败大概率是旧插件,功能多半还能用,
+        由用户决定要不要升级)。
+        """
+        info = self.ping()
+        w = check_handshake(info)
+        if w:
+            info = dict(info)
+            info["compat_warning"] = w
+        return info
 
     def list_atoms(self) -> Dict[str, Any]:
         return self.call("list_atoms")

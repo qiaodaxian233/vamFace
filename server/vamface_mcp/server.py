@@ -55,9 +55,13 @@ def _err(e: Exception) -> Dict[str, Any]:
 
 @mcp.tool()
 def vam_ping() -> Dict[str, Any]:
-    """Check that VaM and the VamFaceBridge plugin are reachable."""
+    """Check that VaM and the VamFaceBridge plugin are reachable.
+
+    Includes a protocol-version handshake: a `compat_warning` field appears
+    when the plugin predates v0.5 or the protocol numbers mismatch.
+    """
     try:
-        return {"ok": True, **_bridge.ping()}
+        return {"ok": True, **_bridge.handshake()}
     except BridgeError as e:
         return _err(e)
 

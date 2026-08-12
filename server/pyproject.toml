@@ -1,6 +1,6 @@
 [project]
 name = "vamface-mcp"
-version = "0.4.0"
+dynamic = ["version"]
 description = "MCP server for automating face creation in Virt-A-Mate 1.22 from photos"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,12 @@ vamface-mcp = "vamface_mcp.server:main"
 vamface-fit = "vamface_mcp.fit_cli:main"
 vamface-gui = "vamface_mcp.gui:main"
 vamface-mock = "vamface_mcp.mock_vam:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "vamface_mcp.__version__"}
+
+[tool.setuptools.package-data]
+vamface_mcp = ["resources/*.cs"]
 
 [build-system]
 requires = ["setuptools>=68"]

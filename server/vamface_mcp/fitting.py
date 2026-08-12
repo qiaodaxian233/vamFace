@@ -91,6 +91,7 @@ class FitConfig:
     default_bound: Tuple[float, float] = (-1.0, 1.0)
     max_iters: int = 60
     screenshot_width: int = 512
+    use_cache: bool = True  # 重访相同 morph 向量时复用分数,省真机截图来回
     seed: Optional[Dict[str, float]] = None  # initial morph values (from route A)
     # Called after every evaluation: (eval_count, score, rendered_image).
     # Used by the GUI for live preview; exceptions in the callback are
@@ -110,30 +111,68 @@ class FitResult:
     prior_seed: Dict[str, float] = field(default_factory=dict)  # 先验给出的初始种子
     neutralized: List[str] = field(default_factory=list)  # 拟合前清零的表情 morph
     stage_count: int = 1                 # coarse-to-fine 的阶段数
+    cache_hits: int = 0                  # 截图缓存命中次数(省下的真机来回)
 
 
 # ---------------------------------------------------------------------------
 # The evaluation closure: morphs -> score, via the live bridge
 # ---------------------------------------------------------------------------
 
-def make_evaluator(bridge: BridgeClient, target: np.ndarray, scorer: Scorer,
-                   cfg: FitConfig) -> Callable[[Dict[str, float]], float]:
-    counter = {"n": 0}
+class Evaluator:
+    """morphs -> score,经由活桥接。可选缓存:重访相同向量直接复用分数。
 
-    def evaluate(morphs: Dict[str, float]) -> float:
-        bridge.set_morphs(cfg.atom, morphs, clamp=True)
-        shot = bridge.screenshot(max_width=cfg.screenshot_width)
+    缓存 key = (epoch, 量化到 1e-4 的完整入参向量)。set_morphs 是**增量**语义,
+    所以任何绕过 evaluate 的 set_morphs(表情归一化、阶段冻结)都会改变底下的
+    真实状态 —— 调用方必须在那之后 bump_epoch(),让旧缓存作废。这就是为什么
+    缓存只做"精确重访去重",不做近邻插值:宁可少省,不能错。
+    """
+
+    def __init__(self, bridge: BridgeClient, target: np.ndarray, scorer: Scorer,
+                 cfg: FitConfig) -> None:
+        self._bridge = bridge
+        self._target = target
+        self._scorer = scorer
+        self._cfg = cfg
+        self._n = 0
+        self._epoch = 0
+        self._cache: Dict[tuple, float] = {}
+        self.cache_hits = 0
+
+    def bump_epoch(self) -> None:
+        """底层 morph 状态被 evaluate 之外的写动过之后调用,作废旧缓存。"""
+        self._epoch += 1
+
+    def _key(self, morphs: Dict[str, float]) -> tuple:
+        return (self._epoch,
+                tuple(sorted((n, round(float(v), 4)) for n, v in morphs.items())))
+
+    def __call__(self, morphs: Dict[str, float]) -> float:
+        cfg = self._cfg
+        if cfg.use_cache:
+            key = self._key(morphs)
+            hit = self._cache.get(key)
+            if hit is not None:
+                self.cache_hits += 1
+                return hit
+        self._bridge.set_morphs(cfg.atom, morphs, clamp=True)
+        shot = self._bridge.screenshot(max_width=cfg.screenshot_width)
         candidate = decode_png_b64(shot["png_base64"])
-        score = scorer.score(target, candidate)
-        counter["n"] += 1
+        score = self._scorer.score(self._target, candidate)
+        self._n += 1
+        if cfg.use_cache:
+            self._cache[key] = score
         if cfg.on_eval is not None:
             try:
-                cfg.on_eval(counter["n"], score, candidate)
+                cfg.on_eval(self._n, score, candidate)
             except Exception:
                 log.exception("on_eval callback failed (ignored)")
         return score
 
-    return evaluate
+
+def make_evaluator(bridge: BridgeClient, target: np.ndarray, scorer: Scorer,
+                   cfg: FitConfig) -> Evaluator:
+    """兼容旧签名:返回可调用的 Evaluator(带 .cache_hits / .bump_epoch)。"""
+    return Evaluator(bridge, target, scorer, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +383,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
             morph_names=order_by_prior(names, seed),
             bounds=cfg.bounds, default_bound=cfg.default_bound,
             max_iters=stage_budget, screenshot_width=cfg.screenshot_width,
+            use_cache=cfg.use_cache,
             seed={n: seed.get(n, 0.0) for n in names},
             on_eval=cfg.on_eval)
         if optimizer == "greedy":
@@ -357,6 +397,7 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
         best_score = res.best_score
         # 冻结本阶段最优:让后续阶段在它之上评估(set_morphs 是增量语义)
         bridge.set_morphs(cfg.atom, res.best_morphs, clamp=True)
+        evaluate.bump_epoch()  # 绕过 evaluate 写了状态,旧缓存作废
         # 阶段间刷新先验:用最新残差修正后续阶段的种子与顺序
         if geo is not None and geo.last_diff and i + 1 < len(stage_names):
             for k, v in seed_from_diff(geo.last_diff, cfg.morph_names,
@@ -369,7 +410,8 @@ def fit_face(bridge: BridgeClient, target_image_path: str, cfg: FitConfig,
                        history=history_all, warning=warning,
                        style=eff_style, scorer_name=scorer.name,
                        prior_seed=prior_seed, neutralized=neutralized,
-                       stage_count=len(stage_names))
+                       stage_count=len(stage_names),
+                       cache_hits=evaluate.cache_hits)
     # 让最优解成为"最近一次评估",这样 hints 描述的是最终结果的残差
     try:
         shot = bridge.screenshot(max_width=cfg.screenshot_width)

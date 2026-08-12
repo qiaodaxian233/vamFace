@@ -36,7 +36,7 @@ a guess (a missing morph is reported in `data.missing`, not an error).
 
 | cmd            | args                                                        | data                                              |
 |----------------|-------------------------------------------------------------|---------------------------------------------------|
-| `ping`         | —                                                           | `{version, app}`                                  |
+| `ping`         | —                                                           | `{version, app, protocol}`                        |
 | `list_atoms`   | —                                                           | `{atoms: [{uid, type}]}`                          |
 | `list_morphs`  | `{atom, filter?, region?, limit?}`                          | `{count, total, morphs: [{name, uid, region, value, min, max}]}` |
 | `get_morphs`   | `{atom, changed_only?}`                                     | `{values: {name: value}}`                         |
@@ -85,3 +85,12 @@ follow community-plugin convention but have not yet been run against
 
 Screenshots use `ReadPixels` on the end-of-frame backbuffer; in VR the
 resolution can be large, hence the `max_width` downscale option.
+
+## Protocol version handshake (v0.5)
+
+`ping` carries `protocol` (int). The server compares it with its own
+`vamface_mcp.PROTOCOL_VERSION` and, on mismatch **or absence** (pre-0.5
+plugin), attaches a human-readable `compat_warning` — surfaced by the MCP
+`vam_ping` tool, the CLI, and the GUI. **Warn, never block**: an old plugin
+usually still works for most commands. Bump `PROTOCOL_VERSION` (Python) and
+`PROTOCOL` (C#) together whenever the wire format changes.
