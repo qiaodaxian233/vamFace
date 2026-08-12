@@ -158,9 +158,17 @@ class BridgeClient:
     def focus_head(self, atom: str) -> Dict[str, Any]:
         return self.call("focus_head", atom=atom)
 
-    def screenshot(self, max_width: int = 0) -> Dict[str, Any]:
-        """Returns {"width", "height", "png_base64"}; can be several MB."""
-        return self.call("screenshot", max_width=max_width, timeout=60.0)
+    def screenshot(self, max_width: int = 0,
+                   camera: Optional[bool] = None) -> Dict[str, Any]:
+        """Returns {"width", "height", "method", "png_base64"}; can be several MB.
+
+        camera=None 沿用插件默认(0.5.5 起为相机 RTT,无 UI);False 强制
+        旧的整屏捕获(调试/对照用);老插件会忽略这个参数。
+        """
+        kw: Dict[str, Any] = {"max_width": max_width, "timeout": 60.0}
+        if camera is not None:
+            kw["camera"] = bool(camera)
+        return self.call("screenshot", **kw)
 
     # -- generic storable/param access ---------------------------------------
 

@@ -40,7 +40,7 @@ namespace VamFace
 {
     public class VamFaceBridge : MVRScript
     {
-        private const string VERSION = "0.5.4";
+        private const string VERSION = "0.5.5";
         // 与 server 端 vamface_mcp.PROTOCOL_VERSION 对账,改协议时两边同步 +1。
         private const int PROTOCOL = 1;
         private const int DEFAULT_PORT = 8787;
@@ -799,50 +799,147 @@ namespace VamFace
 
         // ------------------------------------------------------------------
         // Screenshot (async, replies from coroutine)
+        //
+        // v0.5.5: primary path renders the scene camera into an offscreen
+        // RenderTexture (no screen-space UI, no toolbar, exact requested
+        // width, 4x MSAA). The old whole-screen ReadPixels path is kept as
+        // an automatic fallback — a fit run must never die because camera
+        // discovery failed on some VaM setup.
         // ------------------------------------------------------------------
+
+        // Find the camera rendering the desktop view. Runtime probing only —
+        // deliberately no SuperController camera members here (their names
+        // are unverified on 1.22 and a bad name kills compilation; see the
+        // System.IO lesson). Fallbacks keep this null-safe.
+        private Camera FindSceneCamera()
+        {
+            Camera cam = Camera.main;
+            if (cam != null && cam.enabled) return cam;
+            GameObject go = GameObject.Find("MonitorCenterCamera");
+            if (go != null)
+            {
+                Camera c = go.GetComponent<Camera>();
+                if (c != null && c.enabled) return c;
+            }
+            // Highest-depth enabled camera that renders to the screen.
+            Camera best = null;
+            Camera[] all = Camera.allCameras;
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i].targetTexture != null) continue; // offscreen cam
+                if (best == null || all[i].depth > best.depth) best = all[i];
+            }
+            return best;
+        }
+
+        private byte[] CaptureFromCamera(Camera cam, int maxWidth,
+                                         out int outW, out int outH)
+        {
+            // Keep the on-screen aspect so framing matches what focus_head
+            // set up; render directly at the requested width (crisper than
+            // downscaling a screen grab, and UI-free by construction).
+            int w = maxWidth > 0 ? maxWidth : Screen.width;
+            int h = Mathf.RoundToInt((float)Screen.height * w / Screen.width);
+            RenderTexture rt = RenderTexture.GetTemporary(
+                w, h, 24, RenderTextureFormat.Default,
+                RenderTextureReadWrite.Default, 4);
+            RenderTexture prevTarget = cam.targetTexture;
+            RenderTexture prevActive = RenderTexture.active;
+            int prevMask = cam.cullingMask;
+            try
+            {
+                cam.targetTexture = rt;
+                cam.cullingMask = prevMask & ~LayerMask.GetMask("UI");
+                cam.Render();
+                RenderTexture.active = rt;
+                Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+                tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                tex.Apply();
+                byte[] png = tex.EncodeToPNG();
+                UnityEngine.Object.Destroy(tex);
+                outW = w; outH = h;
+                return png;
+            }
+            finally
+            {
+                cam.targetTexture = prevTarget;
+                cam.cullingMask = prevMask;
+                RenderTexture.active = prevActive;
+                RenderTexture.ReleaseTemporary(rt);
+            }
+        }
 
         private IEnumerator CaptureRoutine(ClientConn conn, string id, JSONClass args)
         {
             int maxWidth = args["max_width"] != null ? args["max_width"].AsInt : 0;
+            // camera arg: default true; {"camera": false} forces the old
+            // whole-screen grab (debug / comparison).
+            bool wantCamera = args["camera"] == null || args["camera"].AsBool;
 
             yield return new WaitForEndOfFrame();
 
             byte[] png = null;
             string error = null;
+            string method = "screen";
             int outW = 0, outH = 0;
-            try
-            {
-                int w = Screen.width;
-                int h = Screen.height;
-                Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-                tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-                tex.Apply();
 
-                if (maxWidth > 0 && w > maxWidth)
+            if (wantCamera)
+            {
+                try
                 {
-                    int nw = maxWidth;
-                    int nh = Mathf.RoundToInt((float)h * nw / w);
-                    RenderTexture rt = RenderTexture.GetTemporary(nw, nh);
-                    Graphics.Blit(tex, rt);
-                    RenderTexture prev = RenderTexture.active;
-                    RenderTexture.active = rt;
-                    Texture2D small = new Texture2D(nw, nh, TextureFormat.RGB24, false);
-                    small.ReadPixels(new Rect(0, 0, nw, nh), 0, 0);
-                    small.Apply();
-                    RenderTexture.active = prev;
-                    RenderTexture.ReleaseTemporary(rt);
-                    UnityEngine.Object.Destroy(tex);
-                    tex = small;
-                    w = nw; h = nh;
+                    Camera cam = FindSceneCamera();
+                    if (cam != null)
+                    {
+                        png = CaptureFromCamera(cam, maxWidth, out outW, out outH);
+                        method = "camera";
+                    }
                 }
-
-                png = tex.EncodeToPNG();
-                outW = w; outH = h;
-                UnityEngine.Object.Destroy(tex);
+                catch (Exception e)
+                {
+                    SuperController.LogMessage(
+                        "VamFaceBridge: camera capture failed, " +
+                        "falling back to screen grab: " + e.Message);
+                    png = null;
+                }
             }
-            catch (Exception e)
+
+            if (png == null)
             {
-                error = "screenshot failed: " + e.Message;
+                try
+                {
+                    int w = Screen.width;
+                    int h = Screen.height;
+                    Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+                    tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                    tex.Apply();
+
+                    if (maxWidth > 0 && w > maxWidth)
+                    {
+                        int nw = maxWidth;
+                        int nh = Mathf.RoundToInt((float)h * nw / w);
+                        RenderTexture rt = RenderTexture.GetTemporary(nw, nh);
+                        Graphics.Blit(tex, rt);
+                        RenderTexture prev = RenderTexture.active;
+                        RenderTexture.active = rt;
+                        Texture2D small = new Texture2D(nw, nh, TextureFormat.RGB24, false);
+                        small.ReadPixels(new Rect(0, 0, nw, nh), 0, 0);
+                        small.Apply();
+                        RenderTexture.active = prev;
+                        RenderTexture.ReleaseTemporary(rt);
+                        UnityEngine.Object.Destroy(tex);
+                        tex = small;
+                        w = nw; h = nh;
+                    }
+
+                    png = tex.EncodeToPNG();
+                    outW = w; outH = h;
+                    UnityEngine.Object.Destroy(tex);
+                    method = "screen";
+                }
+                catch (Exception e)
+                {
+                    error = "screenshot failed: " + e.Message;
+                }
             }
 
             if (error != null)
@@ -854,6 +951,7 @@ namespace VamFace
                 JSONClass d = new JSONClass();
                 d["width"].AsInt = outW;
                 d["height"].AsInt = outH;
+                d["method"] = method;
                 d["png_base64"] = Convert.ToBase64String(png);
                 Reply(conn, id, d);
             }
