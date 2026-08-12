@@ -156,3 +156,119 @@ def save_config(**updates: Any) -> Dict[str, Any]:
     except OSError:
         pass  # 存不了就每次手填,不阻塞
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# server 代码一键更新(v0.5.2 补全:之前只有"检查"+装插件,拉代码要手动 git pull)
+# ---------------------------------------------------------------------------
+
+REPO_ZIP_URL = ("https://codeload.github.com/qiaodaxian233/vamFace/"
+                "zip/refs/heads/main")
+
+# 覆盖时只碰这些顶层前缀,永不删除文件 —— 用户本地的 .vap/截图/配置不受影响。
+_OVERLAY_PREFIXES = ("server/", "plugin/", "scripts/", "docs/")
+
+
+def _default_fetch_bytes(url: str, timeout: float = 30.0) -> bytes:
+    from urllib.request import urlopen
+
+    with urlopen(url, timeout=timeout) as r:  # noqa: S310 (固定 https 常量)
+        return r.read()
+
+
+def repo_root() -> Optional[Path]:
+    """从包位置向上找仓库根(editable 安装 = <repo>/server/vamface_mcp)。
+
+    先认 .git,再认 "server/pyproject.toml + plugin/" 的目录形状
+    (ZIP 下载解压的仓库没有 .git)。找不到返回 None(site-packages 安装)。
+    """
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if (parent / ".git").exists():
+            return parent
+        if (parent / "server" / "pyproject.toml").exists() and \
+                (parent / "plugin").is_dir():
+            return parent
+    return None
+
+
+def _overlay_zip(zip_bytes: bytes, root: Path) -> Dict[str, Any]:
+    """把仓库 zipball 覆盖到 root。只写 _OVERLAY_PREFIXES 下的文件,只增改不删。"""
+    import io as _io
+    import zipfile
+
+    written = 0
+    with zipfile.ZipFile(_io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+        if not names:
+            return {"ok": False, "error": "空 zip"}
+        top = names[0].split("/", 1)[0]  # zipball 顶层是 vamFace-<ref>/
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            rel = info.filename[len(top) + 1:]  # 去掉顶层目录
+            if not rel or not rel.startswith(_OVERLAY_PREFIXES):
+                continue
+            if ".." in rel or rel.startswith("/"):
+                continue  # 防 zip 路径穿越,别信任何归档
+            dest = root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(zf.read(info))
+            written += 1
+    return {"ok": True, "files_written": written}
+
+
+def update_server(fetch_bytes: Optional[Callable[[str], bytes]] = None,
+                  runner: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
+    """把 server 代码更到 GitHub main。永不抛异常。
+
+    优先 `git pull --ff-only`(有 .git 且系统有 git);不行就下载 zipball
+    覆盖(只增改不删,且只碰 server/plugin/scripts/docs)。editable 安装下
+    改动即时生效于**新进程** —— 正在跑的 GUI/CLI 要重启才吃到新代码。
+
+    返回 {ok, method, detail, restart_required, error}。
+    """
+    root = repo_root()
+    if root is None:
+        return {"ok": False, "method": None, "restart_required": False,
+                "error": ("找不到仓库根目录(似乎不是 editable/仓库内安装)。"
+                          "请手动到仓库目录 git pull 后重装。")}
+
+    # 路线 1:git pull --ff-only
+    import shutil as _shutil
+    import subprocess as _sp
+    run = runner or _sp.run
+    if (root / ".git").exists() and _shutil.which("git"):
+        try:
+            before = run(["git", "rev-parse", "--short", "HEAD"], cwd=str(root),
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+            r = run(["git", "pull", "--ff-only"], cwd=str(root),
+                    capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                after = run(["git", "rev-parse", "--short", "HEAD"], cwd=str(root),
+                            capture_output=True, text=True, timeout=15).stdout.strip()
+                changed = before != after
+                return {"ok": True, "method": "git",
+                        "detail": (f"{before} → {after}" if changed
+                                   else f"已是最新({after})"),
+                        "restart_required": changed, "error": None}
+            git_err = (r.stderr or r.stdout or "").strip()[-300:]
+        except Exception as e:  # noqa: BLE001 — 更新失败要降级不要炸
+            git_err = str(e)
+    else:
+        git_err = "无 .git 或系统没装 git"
+
+    # 路线 2:zipball 覆盖
+    try:
+        blob = (fetch_bytes or _default_fetch_bytes)(REPO_ZIP_URL)
+        res = _overlay_zip(blob, root)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "overlay failed")
+        return {"ok": True, "method": "zip",
+                "detail": (f"git 路线未走通({git_err}),已用 zip 覆盖 "
+                           f"{res['files_written']} 个文件"),
+                "restart_required": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "method": None, "restart_required": False,
+                "error": (f"git({git_err});zip({e})。若在国内,拉 GitHub "
+                          f"可能需要开梯子(注意:与 pip 相反,pip 要关梯子)。")}

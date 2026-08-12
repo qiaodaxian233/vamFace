@@ -43,7 +43,7 @@ from .fitting import FitConfig, decode_png_b64, fit_face
 from .morph_presets import FACE_MORPH_GROUPS, default_bounds
 from .skin import apply_skin_color, sample_skin_tone
 from .updater import (check_latest, install_plugin, load_config,
-                      plugin_source_version, save_config)
+                      plugin_source_version, save_config, update_server)
 from .vap import read_vap, write_vap
 
 OUT_DIR = Path("./out").resolve()
@@ -253,13 +253,23 @@ def do_ping(host, port):
         return f"❌ {e}"
 
 
+def do_update_server():
+    r = update_server()
+    if not r["ok"]:
+        return f"❌ 更新失败:{r['error']}"
+    msg = f"✅ server 已更新({r['method']}: {r['detail']})"
+    if r["restart_required"]:
+        msg += "\n代码已到位,但正在跑的进程吃不到 —— 关掉本窗口重新运行 vamface-gui。"
+    return msg
+
+
 def do_check_update():
     r = check_latest()
     if r["error"]:
         return f"server v{r['installed']} · ⚠️ {r['error']}"
     if r["update_available"]:
         return (f"server v{r['installed']} → GitHub 最新 v{r['latest']} · "
-                f"更新: 仓库目录里 `git pull` 后重启;插件用下方连接调试页一键更新")
+                f"点旁边的「一键更新 server」;插件用下方连接调试页一键更新")
     return f"server v{r['installed']} · ✅ 已是最新(GitHub: v{r['latest']})"
 
 
@@ -397,9 +407,11 @@ def build_app():
             port = gr.Number(value=8787, label="Port", precision=0, scale=1)
             ping_btn = gr.Button("测试连接", scale=1)
             upd_btn = gr.Button("检查更新", scale=1)
+            pull_btn = gr.Button("一键更新 server", scale=1)
             ping_out = gr.Markdown("")
         ping_btn.click(do_ping, [host, port], ping_out)
         upd_btn.click(do_check_update, [], ping_out)
+        pull_btn.click(do_update_server, [], ping_out)
 
         with gr.Tab("照片拟合"):
             with gr.Row():
